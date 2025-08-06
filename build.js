@@ -37,6 +37,11 @@ const state = {
     materialsGathered: false
 };
 
+const specialItems = {
+    water: 'water_bucket',
+    lava: 'lava_bucket'
+};
+
 // Helper functions
 const log = (message) => {
     console.log(`[BuilderBot] ${message}`);
@@ -55,18 +60,23 @@ const scanInventory = () => {
 };
 
 const getCombinedItemCount = async (itemName) => {
+    const actualItemName = specialItems[itemName] || itemName;
     scanInventory();
-    let count = state.inventoryCache[itemName] || 0;
+    let count = state.inventoryCache[actualItemName] || 0;
     
     if (state.chestPos) {
         const chestBlock = bot.blockAt(state.chestPos);
         if (chestBlock && chestBlock.name === 'chest') {
-            const chest = await bot.openChest(chestBlock);
-            const chestItems = chest.items().find(i => i.name === itemName);
-            if (chestItems) {
-                count += chestItems.count;
+            try {
+                const chest = await bot.openChest(chestBlock);
+                const chestItems = chest.items().find(i => i.name === actualItemName);
+                if (chestItems) {
+                    count += chestItems.count;
+                }
+                await chest.close();
+            } catch (err) {
+                log(`Error checking chest for items: ${err.message}`);
             }
-            await chest.close();
         }
     }
     return count;
@@ -126,7 +136,8 @@ const downloadSchematic = async () => {
 };
 
 const getItemsFromSource = async (itemName, amount) => {
-    let have = bot.inventory.findInventoryItem(mcDataLoader(bot.version).blocksByName[itemName].id, null, false)?.count || 0;
+    const actualItemName = specialItems[itemName] || itemName;
+    let have = bot.inventory.findInventoryItem(mcDataLoader(bot.version).blocksByName[actualItemName].id, null, false)?.count || 0;
     if (have >= amount) {
         return;
     }
@@ -136,12 +147,12 @@ const getItemsFromSource = async (itemName, amount) => {
         const chestBlock = bot.blockAt(state.chestPos);
         if (chestBlock && chestBlock.name === 'chest') {
             const chest = await bot.openChest(chestBlock);
-            const chestItem = chest.items().find(i => i.name === itemName);
+            const chestItem = chest.items().find(i => i.name === actualItemName);
             if (chestItem) {
                 const toWithdraw = Math.min(amount - have, chestItem.count);
                 if (toWithdraw > 0) {
                     await chest.withdraw(chestItem.type, null, toWithdraw);
-                    log(`Withdrew ${toWithdraw} of ${itemName} from chest.`);
+                    log(`Withdrew ${toWithdraw} of ${actualItemName} from chest.`);
                 }
             }
             await chest.close();
@@ -149,10 +160,9 @@ const getItemsFromSource = async (itemName, amount) => {
             await goToPosition(state.buildPos);
         }
     } else {
-        // If no chest, just use /give
-        log(`No chest set. Getting ${itemName} via /give.`);
+        log(`No chest set. Getting ${actualItemName} via /give.`);
         const giveAmount = amount - have;
-        bot.chat(`/give @s ${itemName} ${giveAmount}`);
+        bot.chat(`/give @s ${actualItemName} ${giveAmount}`);
         await sleep(2000);
     }
 };
@@ -175,7 +185,9 @@ const manageChestItems = async () => {
         const chest = await bot.openChest(chestBlock);
         
         for (const item of bot.inventory.items()) {
-            if (!state.requiredItems[item.name]) {
+            const isSpecialItem = Object.values(specialItems).includes(item.name);
+            const isRequired = state.requiredItems[item.name] || isSpecialItem;
+            if (!isRequired) {
                 await chest.deposit(item.type, null, item.count);
                 await sleep(100); 
             }
@@ -201,12 +213,14 @@ const gatherAllMaterials = async () => {
         log('Starting material gathering. I will use /give to get materials and store them in the chest.');
 
         for (const [name, needed] of Object.entries(state.requiredItems)) {
+            const actualItemName = specialItems[name] || name;
+
             let have = await getCombinedItemCount(name);
 
             while (have < needed) {
                 const toGive = Math.min(needed - have, CONFIG.giveAmount);
-                log(`Giving myself ${toGive} of ${name}...`);
-                bot.chat(`/give @s ${name} ${toGive}`);
+                log(`Giving myself ${toGive} of ${actualItemName}...`);
+                bot.chat(`/give @s ${actualItemName} ${toGive}`);
                 await sleep(2000); 
                 
                 const success = await manageChestItems();
@@ -226,6 +240,7 @@ const gatherAllMaterials = async () => {
         state.isBuilding = false;
     }
 };
+
 const buildStructure = async () => {
     if (state.isBuilding) return;
     state.isBuilding = true;
@@ -248,6 +263,8 @@ const buildStructure = async () => {
             const blockState = palette[block.state.value];
             const blockName = getBlockName(blockState);
             if (blockName === 'air') continue;
+            
+            const actualItemName = specialItems[blockName] || blockName;
 
             const position = new Vec3(
                 block.pos.value[0] + state.buildPos.x,
@@ -260,13 +277,13 @@ const buildStructure = async () => {
                 continue; 
             }
 
-            let item = bot.inventory.findInventoryItem(mcDataLoader(bot.version).blocksByName[blockName].id, null, false);
+            let item = bot.inventory.findInventoryItem(mcDataLoader(bot.version).blocksByName[actualItemName]?.id, null, false);
             if (!item) {
-                await getItemsFromSource(blockName, 1);
-                item = bot.inventory.findInventoryItem(mcDataLoader(bot.version).blocksByName[blockName].id, null, false);
+                await getItemsFromSource(actualItemName, 1);
+                item = bot.inventory.findInventoryItem(mcDataLoader(bot.version).blocksByName[actualItemName]?.id, null, false);
                 if (!item) {
-                    log(`Failed to get ${blockName}. Aborting build.`);
-                    throw new Error(`Failed to get item: ${blockName}`);
+                    log(`Failed to get ${actualItemName}. Aborting build.`);
+                    throw new Error(`Failed to get item: ${actualItemName}`);
                 }
             }
 
@@ -342,7 +359,8 @@ bot.on('chat', (username, message) => {
                     if (Object.keys(state.requiredItems).length > 0) {
                         log('Required materials:');
                         for (const [name, count] of Object.entries(state.requiredItems)) {
-                             log(`${name}: ${count}`);
+                             const actualItemName = specialItems[name] || name;
+                             log(`${actualItemName}: ${count}`);
                         }
                     } else {
                         log('Schematic not loaded or has no blocks.');
