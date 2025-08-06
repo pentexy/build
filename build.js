@@ -1,9 +1,9 @@
 const mineflayer = require('mineflayer');
 const { pathfinder, Movements, goals } = require('mineflayer-pathfinder');
-const { GoalNear } = goals;
-const fs = require('fs');
-const nbt = require('prismarine-nbt');
+const { GoalNear, GoalBlock } = goals;
 const { Vec3 } = require('vec3');
+const nbt = require('prismarine-nbt');
+const fs = require('fs');
 const mcDataLoader = require('minecraft-data');
 const { promisify } = require('util');
 const sleep = promisify(setTimeout);
@@ -21,7 +21,7 @@ const CONFIG = {
     schematicUrl: 'https://files.catbox.moe/r7z2gh.nbt',
     schematicFile: 'house.nbt',
     safetyCheck: true,
-    clearInventory: true,
+    clearInventory: false, // Now handled more intelligently
     requestItems: true
 };
 
@@ -40,20 +40,17 @@ const state = {
     requiredItems: {},
     inventoryItems: {},
     isBuilding: false,
+    isCollecting: false,
     missingItems: {}
 };
 
 // Helper functions
 const log = (message) => {
     console.log(`[${new Date().toISOString()}] ${message}`);
-    if (bot && bot.chat) {
-        bot.chat(message);
-    }
+    if (bot && bot.chat) bot.chat(message);
 };
 
-const getBlockName = (state) => {
-    return state.Name.value.split(':')[1] || state.Name.value;
-};
+const getBlockName = (state) => state.Name.value.split(':')[1] || state.Name.value;
 
 const scanInventory = () => {
     state.inventoryItems = {};
@@ -62,30 +59,20 @@ const scanInventory = () => {
     });
 };
 
-const goToPosition = async (position) => {
-    try {
-        const mcData = mcDataLoader(bot.version);
-        const movements = new Movements(bot, mcData);
-        bot.pathfinder.setMovements(movements);
-        bot.pathfinder.setGoal(new GoalNear(position.x, position.y, position.z, 1));
-        
-        await new Promise((resolve, reject) => {
-            const checkArrival = setInterval(() => {
-                if (bot.entity.position.distanceTo(position) < 2) {
-                    clearInterval(checkArrival);
-                    resolve();
-                }
-            }, 1000);
-            
-            setTimeout(() => {
+const goToPosition = async (position, distance = 1) => {
+    const mcData = mcDataLoader(bot.version);
+    const movements = new Movements(bot, mcData);
+    bot.pathfinder.setMovements(movements);
+    bot.pathfinder.setGoal(new GoalNear(position.x, position.y, position.z, distance));
+    
+    await new Promise((resolve) => {
+        const checkArrival = setInterval(() => {
+            if (bot.entity.position.distanceTo(position) <= distance + 0.5) {
                 clearInterval(checkArrival);
-                reject(new Error('Timeout while trying to reach position'));
-            }, 30000);
-        });
-    } catch (err) {
-        log(`Failed to reach position: ${err.message}`);
-        throw err;
-    }
+                resolve();
+            }
+        }, 500);
+    });
 };
 
 const downloadSchematic = async () => {
@@ -100,41 +87,259 @@ const downloadSchematic = async () => {
         const data = await nbt.parse(buffer);
         state.structure = data.parsed.value;
 
-        const blocks = state.structure.blocks.value.value;
-        const palette = state.structure.palette.value.value;
-
+        // Calculate required items
         state.requiredItems = {};
-        blocks.forEach(block => {
-            const blockState = palette[block.state.value];
+        state.structure.blocks.value.value.forEach(block => {
+            const blockState = state.structure.palette.value.value[block.state.value];
             const name = getBlockName(blockState);
             state.requiredItems[name] = (state.requiredItems[name] || 0) + 1;
         });
 
-        log('Schematic loaded successfully ✅');
-        return true;
+        log('Schematic loaded ✅');
     } catch (err) {
         log(`Failed to load schematic: ${err.message}`);
+    }
+};
+
+const manageInventory = async () => {
+    if (!state.chestPos) return false;
+    
+    try {
+        await goToPosition(state.chestPos);
+        const chestBlock = bot.blockAt(state.chestPos);
+        if (!chestBlock) throw new Error('Chest not found');
+        
+        const chest = await bot.openChest(chestBlock);
+        
+        // Deposit non-building items
+        for (const item of bot.inventory.items()) {
+            if (!state.requiredItems[item.name]) {
+                try {
+                    await chest.deposit(item.type, null, item.count);
+                    log(`Deposited ${item.count}x ${item.name} to chest`);
+                } catch (err) {
+                    log(`Failed to deposit ${item.name}: ${err.message}`);
+                }
+            }
+        }
+        
+        // Withdraw needed items
+        scanInventory();
+        for (const [name, needed] of Object.entries(state.requiredItems)) {
+            const have = state.inventoryItems[name] || 0;
+            if (have < needed) {
+                const items = chest.items().filter(i => i.name === name);
+                if (items.length > 0) {
+                    const toTake = Math.min(needed - have, items[0].count);
+                    await chest.withdraw(items[0].type, null, toTake);
+                    log(`Withdrew ${toTake}x ${name} from chest`);
+                }
+            }
+        }
+        
+        await chest.close();
+        return true;
+    } catch (err) {
+        log(`Chest error: ${err.message}`);
         return false;
     }
 };
 
-const requestMissingItems = () => {
-    state.missingItems = {};
+const collectNearbyItems = async () => {
+    const items = Object.values(bot.entities).filter(e => e.type === 'item');
+    for (const item of items) {
+        if (state.requiredItems[item.name]) {
+            await goToPosition(item.position, 2);
+            await sleep(500); // Wait for item collection
+        }
+    }
+};
+
+const requestMissingItems = async () => {
     scanInventory();
+    state.missingItems = {};
     
-    for (const [name, count] of Object.entries(state.requiredItems)) {
+    for (const [name, needed] of Object.entries(state.requiredItems)) {
         const have = state.inventoryItems[name] || 0;
-        if (have < count) {
-            state.missingItems[name] = count - have;
+        if (have < needed) {
+            state.missingItems[name] = needed - have;
         }
     }
     
     if (Object.keys(state.missingItems).length > 0) {
-        log('Missing items:');
-        for (const [item, amount] of Object.entries(state.missingItems)) {
-            log(`/give @s ${item} ${amount}`);
+        log('Going to chest first...');
+        await manageInventory();
+        await collectNearbyItems();
+        
+        // Recheck after inventory management
+        scanInventory();
+        state.missingItems = {};
+        
+        for (const [name, needed] of Object.entries(state.requiredItems)) {
+            const have = state.inventoryItems[name] || 0;
+            if (have < needed) {
+                state.missingItems[name] = needed - have;
+            }
         }
-    } else {
+        
+        if (Object.keys(state.missingItems).length > 0) {
+            log('Still missing items:');
+            for (const [item, amount] of Object.entries(state.missingItems)) {
+                log(`/give @s ${item} ${amount}`);
+            }
+            return false;
+        }
+    }
+    return true;
+};
+
+const buildStructure = async () => {
+    if (state.isBuilding) return;
+    state.isBuilding = true;
+
+    try {
+        if (!state.buildPos || !state.structure) {
+            throw new Error('Set build position and load schematic first');
+        }
+
+        // Manage inventory before building
+        const ready = await requestMissingItems();
+        if (!ready) {
+            log('Cannot build without required items');
+            return;
+        }
+
+        log('Starting building...');
+
+        const { blocks, palette } = state.structure.blocks.value.value.reduce((acc, block) => {
+            const blockState = state.structure.palette.value.value[block.state.value];
+            const name = getBlockName(blockState);
+            if (state.requiredItems[name]) {
+                acc.blocks.push(block);
+                acc.palette[block.state.value] = blockState;
+            }
+            return acc;
+        }, { blocks: [], palette: {} });
+
+        for (const block of blocks) {
+            if (!state.isBuilding) break;
+
+            const blockState = palette[block.state.value];
+            const blockName = getBlockName(blockState);
+            const position = new Vec3(
+                block.pos.value[0] + state.buildPos.x,
+                block.pos.value[1] + state.buildPos.y,
+                block.pos.value[2] + state.buildPos.z
+            );
+
+            // Check inventory and collect items if needed
+            const item = bot.inventory.items().find(i => i.name === blockName);
+            if (!item) {
+                log(`Out of ${blockName}, collecting more...`);
+                await requestMissingItems();
+                continue;
+            }
+
+            try {
+                await bot.equip(item, 'hand');
+                const reference = bot.blockAt(position.offset(0, -1, 0));
+                if (!reference || reference.name === 'air') {
+                    log(`No support below ${position}, adding support`);
+                    await bot.equip(bot.inventory.items().find(i => i.name === 'dirt'), 'hand');
+                    await bot.placeBlock(bot.blockAt(position.offset(0, -1, 0)), new Vec3(0, 1, 0));
+                }
+                await bot.placeBlock(bot.blockAt(position), new Vec3(0, 1, 0));
+                await sleep(CONFIG.buildDelay);
+            } catch (err) {
+                log(`Building error: ${err.message}`);
+            }
+        }
+
+        log('Build complete ✅');
+    } catch (err) {
+        log(`Build failed: ${err.message}`);
+    } finally {
+        state.isBuilding = false;
+    }
+};
+
+// Event handlers
+bot.once('spawn', async () => {
+    log('Bot spawned!');
+    await downloadSchematic();
+});
+
+const handleCommand = async (username, message) => {
+    if (username === bot.username) return;
+
+    const args = message.trim().split(' ');
+    const cmd = args[0].toLowerCase();
+
+    try {
+        switch (cmd) {
+            case '!setchest':
+                if (args.length === 4) {
+                    state.chestPos = new Vec3(+args[1], +args[2], +args[3]);
+                    log(`Chest set at ${state.chestPos}`);
+                }
+                break;
+
+            case '!come':
+                if (args.length === 4) {
+                    state.buildPos = new Vec3(+args[1], +args[2], +args[3]);
+                    await goToPosition(state.buildPos);
+                }
+                break;
+
+            case '!build':
+                await buildStructure();
+                break;
+
+            case '!materials':
+                await requestMissingItems();
+                break;
+
+            case '!collect':
+                await collectNearbyItems();
+                break;
+
+            case '!stop':
+                state.isBuilding = false;
+                log('Stopped current action');
+                break;
+
+            case '!help':
+                log('Commands: !setchest x y z, !come x y z, !build, !materials, !collect, !stop');
+                break;
+        }
+    } catch (err) {
+        log(`Error: ${err.message}`);
+    }
+};
+
+bot.on('chat', (username, message) => {
+    handleCommand(username, message).catch(err => {
+        log(`Command error: ${err.message}`);
+    });
+});
+
+bot.on('error', err => log(`Error: ${err.message}`));
+bot.on('kicked', reason => log(`Kicked: ${reason}`));
+bot.on('end', reason => log(`Disconnected: ${reason}`));
+
+// Collect nearby items periodically
+setInterval(async () => {
+    if (!state.isBuilding && !state.isCollecting) {
+        state.isCollecting = true;
+        try {
+            await collectNearbyItems();
+        } catch (err) {
+            log(`Collection error: ${err.message}`);
+        } finally {
+            state.isCollecting = false;
+        }
+    }
+}, 30000);    } else {
         log('All required items available!');
     }
 };
