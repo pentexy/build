@@ -86,7 +86,10 @@ const downloadSchematic = async () => {
         log('Downloading schematic...');
         const res = await fetch(CONFIG.schematicUrl, { agent });
         if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
-        const buffer = await res.buffer();
+        
+        // Correctly handle the response body as a buffer
+        const arrayBuffer = await res.arrayBuffer();
+        const buffer = Buffer.from(arrayBuffer);
         fs.writeFileSync('schematic.nbt', buffer);
         
         const data = await nbt.parse(buffer);
