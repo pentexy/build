@@ -42,6 +42,21 @@ const specialItems = {
     lava: 'lava_bucket'
 };
 
+// Add this new mapping at the top of your script.
+const complexItems = {
+    potted_azure_bluet: {
+        items: ['flower_pot', 'azure_bluet'],
+        craft: (position) => {
+            // Logic to place flower_pot, then azure_bluet
+            const flowerPotItem = bot.inventory.findInventoryItem(mcDataLoader(bot.version).itemsByName.flower_pot.id);
+            if (!flowerPotItem) return;
+            // The bot would need to place the flower_pot and then place the flower inside.
+            // This is a more complex multi-step action.
+        }
+    }
+    // You can add other complex items here like potted_oak_sapling, etc.
+};
+
 // Helper functions
 const log = (message) => {
     console.log(`[BuilderBot] ${message}`);
