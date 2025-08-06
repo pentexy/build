@@ -67,7 +67,7 @@ const goToPosition = async (position) => {
         }, 15000); // 15-second timeout
 
         const checkArrival = setInterval(() => {
-            if (!bot.pathfinder.is</pathfinding>) {
+            if (!bot.pathfinder.isMoving()) {
                 clearInterval(checkArrival);
                 clearTimeout(timeout);
                 if (bot.entity.position.distanceTo(position) < 2) {
