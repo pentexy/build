@@ -109,7 +109,7 @@ const downloadSchematic = async () => {
     }
 };
 
-const getItemsFromChest = async (requiredItems) => {
+const getItemsForLayer = async (requiredItems) => {
     if (!state.chestPos) {
         throw new Error('No chest set. Cannot get items.');
     }
@@ -137,12 +137,13 @@ const getItemsFromChest = async (requiredItems) => {
                 await chest.withdraw(itemToWithdraw.type, null, amountToWithdraw);
                 log(`Withdrew ${amountToWithdraw} ${itemName} from chest.`);
             } else {
-                log(`Could not find ${itemName} in chest.`);
+                log(`Could not find ${itemName} in chest. Will not be able to build.`);
             }
             await sleep(1000);
         }
     } finally {
         await chest.close();
+        await bot.waitForTicks(20);
     }
 };
 
@@ -155,11 +156,13 @@ const buildStructure = async () => {
             throw new Error('Set build position and load schematic first. Use !come x y z.');
         }
 
+        const blocks = state.structure.blocks.value.value;
         const palette = state.structure.palette.value.value;
+        
         const blocksByLayer = new Map();
         
         // Group blocks by layer (y-coordinate)
-        state.structure.blocks.value.value.forEach(block => {
+        blocks.forEach(block => {
             const y = block.pos.value[1];
             if (!blocksByLayer.has(y)) {
                 blocksByLayer.set(y, []);
@@ -183,10 +186,9 @@ const buildStructure = async () => {
                     layerRequiredItems[blockName] = (layerRequiredItems[blockName] || 0) + 1;
                 }
             }
-
+            
             // Withdraw all items needed for this layer from the chest
-            await getItemsFromChest(layerRequiredItems);
-            await bot.waitForTicks(20);
+            await getItemsForLayer(layerRequiredItems);
 
             // Now, build the entire layer
             for (const block of layerBlocks) {
