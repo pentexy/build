@@ -296,9 +296,56 @@ bot.on('chat', (username, message) => {
                         log('Schematic not loaded or has no blocks.');
                     }
                     break;
+                case '!wdyn':
+                    if (!state.structure) {
+                        log('Schematic not loaded. Cannot determine required materials.');
+                        break;
+                    }
+                    
+                    const blocksByLayer = new Map();
+                    state.structure.blocks.value.value.forEach(block => {
+                        const y = block.pos.value[1];
+                        if (!blocksByLayer.has(y)) {
+                            blocksByLayer.set(y, []);
+                        }
+                        blocksByLayer.get(y).push(block);
+                    });
+
+                    const sortedLayers = Array.from(blocksByLayer.keys()).sort((a, b) => a - b);
+                    if (sortedLayers.length === 0) {
+                        log('Schematic contains no blocks.');
+                        break;
+                    }
+                    
+                    const firstLayerY = sortedLayers[0];
+                    const firstLayerBlocks = blocksByLayer.get(firstLayerY);
+                    
+                    const firstLayerRequiredItems = {};
+                    const palette = state.structure.palette.value.value;
+                    
+                    for (const block of firstLayerBlocks) {
+                        const blockState = palette[block.state.value];
+                        const blockName = getBlockName(blockState);
+                        if (blockName !== 'air') {
+                            firstLayerRequiredItems[blockName] = (firstLayerRequiredItems[blockName] || 0) + 1;
+                        }
+                    }
+
+                    if (Object.keys(firstLayerRequiredItems).length > 0) {
+                        const materialsList = [];
+                        for (const [name, count] of Object.entries(firstLayerRequiredItems)) {
+                            const actualItemNames = specialItems[name] || [name];
+                            const displayNames = Array.isArray(actualItemNames) ? actualItemNames.join(' & ') : actualItemNames;
+                            materialsList.push(`${displayNames}: ${count}`);
+                        }
+                        log(`Required for the first layer: ${materialsList.join(', ')}`);
+                    } else {
+                        log('The first layer of the schematic requires no materials.');
+                    }
+                    break;
 
                 case '!help':
-                    log('Available commands: !setchest <x y z>, !come <x y z>, !build, !stop, !materials, !help');
+                    log('Available commands: !setchest <x y z>, !come <x y z>, !build, !stop, !materials, !wdyn, !help');
                     break;
             }
         } catch (err) {
