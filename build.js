@@ -13,7 +13,7 @@ const fetch = (...args) => import('node-fetch').then(({default: fetch}) => fetch
 
 // Configuration
 const CONFIG = {
-    host: 'localhost',
+    host: 'unholy-engraved.ap.e4mc.link',
     port: 25565,
     username: 'BuilderBot',
     buildDelay: 100,
@@ -142,6 +142,89 @@ const buildStructure = async () => {
         
         const blocks = state.structure.blocks.value;
         
+        for (let i = 0; i < blocks.length; i++) {
+            const block = blocks[i];
+            const blockState = state.structure.palette.value[block.state.value];
+            const blockName = getBlockName(blockState);
+            const position = new Vec3(
+                block.pos.value[0] + state.buildPos.x,
+                block.pos.value[1] + state.buildPos.y,
+                block.pos.value[2] + state.buildPos.z
+            );
+            
+            const item = bot.inventory.items().find(it => it.name === blockName);
+            
+            if (!item) {
+                log(`Out of ${blockName}, skipping...`);
+                continue;
+            }
+            
+            try {
+                await bot.equip(item, 'hand');
+                await bot.placeBlock(bot.blockAt(position), new Vec3(0, 1, 0));
+                await sleep(CONFIG.buildDelay);
+            } catch (err) {
+                log(`Failed to place ${blockName}: ${err.message}`);
+            }
+        }
+        
+        log('Build complete ✅');
+    } catch (err) {
+        log(`Build failed: ${err.message}`);
+    } finally {
+        state.isBuilding = false;
+    }
+};
+
+// Event handlers
+bot.once('spawn', async () => {
+    log('Bot spawned!');
+    await downloadSchematic();
+});
+
+bot.on('chat', async (username, message) => {
+    if (username === bot.username) return;
+    
+    const args = message.split(' ');
+    const command = args[0].toLowerCase();
+    
+    try {
+        switch (command) {
+            case '!setchest':
+                if (args.length === 4) {
+                    state.chestPos = new Vec3(+args[1], +args[2], +args[3]);
+                    log(`Chest set at ${state.chestPos}`);
+                }
+                break;
+                
+            case '!come':
+                if (args.length === 4) {
+                    state.buildPos = new Vec3(+args[1], +args[2], +args[3]);
+                    await goToPosition(state.buildPos);
+                }
+                break;
+                
+            case '!build':
+                await buildStructure();
+                break;
+                
+            case '!materials':
+                log(`Required materials: ${JSON.stringify(state.requiredItems)}`);
+                break;
+                
+            case '!stop':
+                state.isBuilding = false;
+                log('Stopped building');
+                break;
+        }
+    } catch (err) {
+        log(`Error: ${err.message}`);
+    }
+});
+
+bot.on('error', err => log(`Bot error: ${err.message}`));
+bot.on('kicked', reason => log(`Kicked: ${reason}`));
+bot.on('end', reason => log(`Disconnected: ${reason}`));        
         for (let i = 0; i < blocks.length; i++) {
             const block = blocks[i];
             const blockState = state.structure.palette.value[block.state.value];
