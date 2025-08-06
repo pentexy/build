@@ -1,147 +1,144 @@
-// Layered structure builder bot
-
 const mineflayer = require('mineflayer');
-const { pathfinder, Movements, goals } = require('mineflayer-pathfinder');
-const { GoalNear } = goals;
 const { Vec3 } = require('vec3');
-const nbt = require('prismarine-nbt');
 const fs = require('fs');
-const mcDataLoader = require('minecraft-data');
+const https = require('https');
+const path = require('path');
+const { load } = require('prismarine-nbt');
+const { parse } = require('prismarine-nbt');
 const { promisify } = require('util');
-const sleep = promisify(setTimeout);
+const nbt = require('prismarine-nbt');
 
-// For Node.js < 18
-const fetch = (...args) => import('node-fetch').then(({ default: fetch }) => fetch(...args));
-
-// Configuration
 const CONFIG = {
-  host: 'unholy-engraved.ap.e4mc.link',
-  port: 25565,
-  username: 'BuilderBot',
-  buildDelay: 100,
-  schematicUrl: 'https://files.catbox.moe/r7z2gh.nbt',
-  schematicFile: 'house.nbt'
+    host: 'unholy-engraved.ap.e4mc.link',
+    port: 25565,
+    username: 'BuilderBot',
+    buildDelay: 100,
+    maxRetries: 3,
+    schematicUrl: 'https://files.catbox.moe/r7z2gh.nbt',
+    schematicFile: 'house.nbt',
+    safetyCheck: true,
+    clearInventory: true
 };
 
-// Create the bot
-const bot = mineflayer.createBot({
-  host: CONFIG.host,
-  port: CONFIG.port,
-  username: CONFIG.username
-});
+// Helper function to download schematic
+function downloadFile(url, dest) {
+    return new Promise((resolve, reject) => {
+        const file = fs.createWriteStream(dest);
+        https.get(url, (response) => {
+            if (response.statusCode !== 200) {
+                return reject(new Error(`Failed to get '${url}' (${response.statusCode})`));
+            }
+            response.pipe(file);
+            file.on('finish', () => file.close(resolve));
+        }).on('error', (err) => {
+            fs.unlink(dest, () => reject(err));
+        });
+    });
+}
 
-bot.loadPlugin(pathfinder);
+// Load schematic
+async function loadSchematic(filePath) {
+    const data = fs.readFileSync(filePath);
+    const { parsed } = await nbt.parse(data);
+    return parsed;
+}
 
-let structure, palette, layers = [], buildPos = null;
+// Main bot
+let bot;
 
-const log = (msg) => console.log(`[${new Date().toISOString()}] ${msg}`);
+async function startBot() {
+    bot = mineflayer.createBot({
+        host: CONFIG.host,
+        port: CONFIG.port,
+        username: CONFIG.username
+    });
 
-const getBlockName = (state) => state.Name.value.split(':')[1];
+    bot.once('spawn', async () => {
+        console.log('✅ Bot spawned in the world.');
 
-// Group blocks by Y layer
-const groupBlocksByLayer = (blocks) => {
-  const grouped = {};
-  for (const block of blocks) {
-    const y = block.pos.value[1];
-    if (!grouped[y]) grouped[y] = [];
-    grouped[y].push(block);
-  }
-  return Object.entries(grouped)
-    .sort((a, b) => a[0] - b[0])
-    .map(([_, v]) => v);
-};
+        if (!fs.existsSync(CONFIG.schematicFile)) {
+            console.log('⬇️ Downloading schematic...');
+            await downloadFile(CONFIG.schematicUrl, CONFIG.schematicFile);
+            console.log('✅ Schematic downloaded.');
+        }
 
-// Download and parse schematic file
-const downloadAndParseSchematic = async () => {
-  const res = await fetch(CONFIG.schematicUrl);
-  const buffer = await res.buffer();
-  fs.writeFileSync(CONFIG.schematicFile, buffer);
-  const data = await nbt.parse(buffer);
-  structure = data.parsed.value;
-  palette = structure.palette.value.value;
-  layers = groupBlocksByLayer(structure.blocks.value.value);
-  log(`Schematic downloaded and parsed (${layers.length} layers)`);
-};
+        const schematic = await loadSchematic(CONFIG.schematicFile);
+        console.log('✅ Schematic loaded.');
 
-// Move the bot to the given position
-const goTo = async (pos) => {
-  const mcData = mcDataLoader(bot.version);
-  bot.pathfinder.setMovements(new Movements(bot, mcData));
-  bot.pathfinder.setGoal(new GoalNear(pos.x, pos.y, pos.z, 1));
-  await new Promise((res) => {
-    const int = setInterval(() => {
-      if (bot.entity.position.distanceTo(pos) < 2) {
-        clearInterval(int);
-        res();
-      }
-    }, 500);
-  });
-};
+        const size = schematic.value.size.value.value;
+        const blocks = schematic.value.blocks.value;
 
-// Scan bot's inventory
-const scanInventory = () => {
-  const result = {};
-  for (const item of bot.inventory.items()) {
-    result[item.name] = (result[item.name] || 0) + item.count;
-  }
-  return result;
-};
+        const origin = bot.entity.position.floored().offset(1, 0, 1);
+        let completed = 0;
+        let failed = 0;
 
-// Build a single layer
-const buildLayer = async (layerIndex) => {
-  const layer = layers[layerIndex];
-  log(`Starting layer ${layerIndex + 1}/${layers.length}`);
-  const inventory = scanInventory();
+        console.log(`🚧 Starting build at ${origin.x}, ${origin.y}, ${origin.z}`);
+        const palette = schematic.value.palette.value.value;
 
-  for (const block of layer) {
-    const state = palette[block.state.value];
-    const name = getBlockName(state);
-    const item = bot.inventory.items().find(i => i.name === name);
-    const pos = new Vec3(
-      block.pos.value[0] + buildPos.x,
-      block.pos.value[1] + buildPos.y,
-      block.pos.value[2] + buildPos.z
-    );
+        const blockMap = {};
+        for (const [name, id] of Object.entries(palette)) {
+            blockMap[id] = name;
+        }
 
-    if (!item) {
-      log(`Missing ${name}, skipping block`);
-      continue;
-    }
+        const blockData = blocks.palette.value.value;
+        const blockStates = blocks.block_states.value.value;
 
-    try {
-      await bot.equip(item, 'hand');
-      const reference = bot.blockAt(pos.offset(0, -1, 0));
-      if (!reference || reference.name === 'air') {
-        continue; // No support
-      }
-      await bot.placeBlock(reference, new Vec3(0, 1, 0));
-      await sleep(CONFIG.buildDelay);
-    } catch (err) {
-      log(`Failed to place ${name} at ${pos}: ${err.message}`);
-    }
-  }
-};
+        for (let y = 0; y < size[1]; y++) {
+            for (let z = 0; z < size[2]; z++) {
+                for (let x = 0; x < size[0]; x++) {
+                    const index = y * size[0] * size[2] + z * size[0] + x;
+                    const state = blockStates[index];
+                    const blockName = blockMap[state];
 
-// Bot ready
-bot.once('spawn', async () => {
-  log('Bot spawned. Downloading schematic...');
-  await downloadAndParseSchematic();
-});
+                    if (!blockName || blockName === 'minecraft:air') continue;
 
-// Chat commands
-bot.on('chat', async (username, message) => {
-  if (username === bot.username) return;
-  const args = message.trim().split(' ');
+                    const position = origin.offset(x, y, z);
+                    const block = bot.blockAt(position);
 
-  if (args[0] === '!come' && args.length === 4) {
-    buildPos = new Vec3(+args[1], +args[2], +args[3]);
-    await goTo(buildPos);
-    log(`Build position set to ${buildPos}`);
-  }
+                    if (!block || block.name !== blockName.replace('minecraft:', '')) {
+                        try {
+                            await placeBlock(bot, position, blockName);
+                            completed++;
+                            process.stdout.write(`\r🧱 Placed: ${completed} | ❌ Failed: ${failed}`);
+                            await sleep(CONFIG.buildDelay);
+                        } catch (e) {
+                            failed++;
+                        }
+                    }
+                }
+            }
+        }
 
-  if (args[0] === '!build') {
-    if (!buildPos) {
-      log('Set build position first using !come x y z');
+        console.log(`\n✅ Build completed. Total: ${completed}, Failed: ${failed}`);
+        bot.chat("🏠 Build complete!");
+    });
+
+    bot.on('error', console.log);
+    bot.on('end', () => {
+        console.log("⚠️ Bot disconnected. Restarting...");
+        setTimeout(startBot, 5000);
+    });
+}
+
+function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function placeBlock(bot, position, blockName) {
+    return new Promise((resolve, reject) => {
+        const reference = bot.blockAt(position.offset(0, -1, 0));
+        if (!reference || !bot.canPlaceBlock(reference, new Vec3(0, 1, 0))) {
+            return reject("Can't place block here.");
+        }
+
+        bot.placeBlock(reference, new Vec3(0, 1, 0), (err) => {
+            if (err) return reject(err);
+            resolve();
+        });
+    });
+}
+
+startBot();      log('Set build position first using !come x y z');
       return;
     }
 
