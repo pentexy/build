@@ -10,7 +10,7 @@ const sleep = promisify(setTimeout);
 
 // Configuration
 const CONFIG = {
-    host: 'budget-prior.ap.e4mc.link',
+    host: 'sacrifice-treadmill.sg.e4mc.link',
     port: 25565,
     username: 'BuilderBot',
     buildDelay: 200,
