@@ -17,7 +17,7 @@ const CONFIG = {
     host: '54.151.198.24',
     port: 25565,
     username: 'BuilderBot',
-    buildDelay: 100,
+    buildDelay: 200,
     schematicUrl: 'https://files.catbox.moe/q1kime.nbt',
     chestSearchRadius: 10,
 };
@@ -352,7 +352,7 @@ bot.on('chat', (username, message) => {
             log(`Command error: ${err.message}`);
         }
     })();
-};
+});
 bot.on('error', err => log(`Bot error: ${err.message}`));
 bot.on('kicked', reason => log(`Kicked: ${reason}`));
 bot.on('end', reason => log(`Disconnected: ${reason}`));
