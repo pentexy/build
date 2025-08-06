@@ -8,23 +8,15 @@ const mcDataLoader = require('minecraft-data');
 const { promisify } = require('util');
 const sleep = promisify(setTimeout);
 
-// For Node.js <18
-const fetch = (...args) => import('node-fetch').then(({default: fetch}) => fetch(...args));
-
 // Configuration
 const CONFIG = {
     host: '18.143.129.103',
     port: 25565,
     username: 'BuilderBot',
-    buildDelay: 100, // Delay between placing blocks
-    maxRetries: 3, // Max retries for general operations (not specific to layers now)
-    schematicUrl: 'https://files.catbox.moe/r7z2gh.nbt', // URL to your schematic
-    schematicFile: 'house.nbt', // Local file name for schematic
-    safetyCheck: true, // Not fully implemented, but good to have
-    clearInventory: false, // Not fully implemented
-    requestItems: true, // Not fully implemented
-    layerHeight: 2, // How many layers to build at a time before returning to chest
-    scaffoldingBlock: 'dirt' // Block to use for scaffolding
+    buildDelay: 200,
+    maxLayersPerTrip: 3, // How many layers to build before returning to chest
+    scaffoldBlock: 'dirt', // Block to use for scaffolding
+    schematicUrl: 'https://files.catbox.moe/r7z2gh.nbt'
 };
 
 const bot = mineflayer.createBot({
@@ -36,77 +28,274 @@ const bot = mineflayer.createBot({
 bot.loadPlugin(pathfinder);
 
 const state = {
-    chestPos: null, // Position of the chest
-    buildPos: null, // Starting position for the build
-    structure: null, // Loaded schematic data
-    requiredItems: {}, // All items needed for the entire schematic
-    inventoryItems: {}, // Current items in bot's inventory
-    isBuilding: false, // Flag to indicate if building is in progress
-    isCollecting: false, // Flag to indicate if collecting is in progress
-    missingItems: {}, // Items currently missing for the build
-    scaffoldingBlocks: [] // Keep track of placed scaffolding blocks
+    chestPos: null,
+    buildPos: null,
+    structure: null,
+    currentLayer: 0,
+    isBuilding: false,
+    isCollecting: false,
+    layers: {}
 };
 
 // Helper functions
 const log = (message) => {
-    console.log(`[${new Date().toISOString()}] ${message}`);
-    if (bot && bot.chat) bot.chat(message);
+    console.log(`[BuilderBot] ${message}`);
+    bot.chat(message);
 };
 
-// Extracts the block name from a prismarine-nbt block state
-const getBlockName = (blockState) => {
-    // Example: { Name: { type: 'string', value: 'minecraft:stone' } }
-    return blockState.Name.value.split(':')[1] || blockState.Name.value;
-};
+const getBlockName = (state) => state.Name.value.split(':')[1] || state.Name.value;
 
-// Scans the bot's inventory and updates the state.inventoryItems
-const scanInventory = () => {
-    state.inventoryItems = {};
-    bot.inventory.items().forEach(item => {
-        state.inventoryItems[item.name] = (state.inventoryItems[item.name] || 0) + item.count;
-    });
-};
-
-// Moves the bot to a specific position within a given distance
 const goToPosition = async (position, distance = 1) => {
     const mcData = mcDataLoader(bot.version);
     const movements = new Movements(bot, mcData);
     bot.pathfinder.setMovements(movements);
     bot.pathfinder.setGoal(new GoalNear(position.x, position.y, position.z, distance));
     
-    // Wait until the bot is close enough to the target position
     await new Promise((resolve) => {
         const checkArrival = setInterval(() => {
-            // Check if the bot is within the desired distance
             if (bot.entity.position.distanceTo(position) <= distance + 0.5) {
                 clearInterval(checkArrival);
                 resolve();
             }
-            // Add a timeout to prevent infinite waiting if path is blocked
-            // (More advanced error handling for pathfinding could be added here)
         }, 500);
     });
 };
 
-// Makes the bot look at a specific block position
-const faceBlock = async (position) => {
-    await bot.lookAt(position.offset(0.5, 0.5, 0.5), true);
+const facePosition = async (position) => {
+    const delta = position.minus(bot.entity.position);
+    bot.lookAt(delta, true);
+    await sleep(200);
 };
 
-// Downloads the schematic from the configured URL and parses it
 const downloadSchematic = async () => {
     try {
         log('Downloading schematic...');
         const res = await fetch(CONFIG.schematicUrl);
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        
         const buffer = await res.buffer();
-        fs.writeFileSync(CONFIG.schematicFile, buffer); // Save locally
+        fs.writeFileSync('schematic.nbt', buffer);
         
         const data = await nbt.parse(buffer);
         state.structure = data.parsed.value;
+        
+        // Organize blocks by layer
+        state.layers = {};
+        state.structure.blocks.value.value.forEach(block => {
+            const y = Math.floor(block.pos.value[1]);
+            if (!state.layers[y]) state.layers[y] = [];
+            state.layers[y].push(block);
+        });
+        
+        log(`Loaded schematic with ${Object.keys(state.layers).length} layers`);
+    } catch (err) {
+        log(`Schematic error: ${err.message}`);
+    }
+};
 
-        // Calculate all required items for the entire schematic
+const getItemsForLayers = (startLayer, count) => {
+    const items = {};
+    for (let i = 0; i < count; i++) {
+        const layer = startLayer + i;
+        if (!state.layers[layer]) continue;
+        
+        state.layers[layer].forEach(block => {
+            const blockState = state.structure.palette.value.value[block.state.value];
+            const name = getBlockName(blockState);
+            items[name] = (items[name] || 0) + 1;
+        });
+    }
+    return items;
+};
+
+const manageChestInventory = async () => {
+    if (!state.chestPos) {
+        log('No chest set! Use !setchest first');
+        return false;
+    }
+
+    await goToPosition(state.chestPos);
+    await facePosition(state.chestPos);
+    
+    const chestBlock = bot.blockAt(state.chestPos);
+    if (!chestBlock || !chestBlock.name.includes('chest')) {
+        log('No chest found at location');
+        return false;
+    }
+
+    const chest = await bot.openChest(chestBlock);
+    
+    // 1. Deposit all non-essential items
+    for (const item of bot.inventory.items()) {
+        if (item.name !== CONFIG.scaffoldBlock) { // Keep scaffold blocks
+            await chest.deposit(item.type, null, item.count);
+        }
+    }
+    
+    // 2. Withdraw needed items for next layers
+    const layersToBuild = Math.min(CONFIG.maxLayersPerTrip, Object.keys(state.layers).length - state.currentLayer);
+    const neededItems = getItemsForLayers(state.currentLayer, layersToBuild);
+    
+    for (const [name, count] of Object.entries(neededItems)) {
+        const items = chest.items().filter(i => i.name === name);
+        if (items.length > 0) {
+            await chest.withdraw(items[0].type, null, Math.min(count, items[0].count));
+        }
+    }
+    
+    // 3. Ensure we have scaffold blocks
+    const scaffoldItems = chest.items().filter(i => i.name === CONFIG.scaffoldBlock);
+    if (scaffoldItems.length > 0) {
+        await chest.withdraw(scaffoldItems[0].type, null, 64);
+    }
+    
+    await chest.close();
+    return true;
+};
+
+const buildScaffold = async (position) => {
+    if (!bot.inventory.items().some(i => i.name === CONFIG.scaffoldBlock)) {
+        log(`No ${CONFIG.scaffoldBlock} for scaffolding`);
+        return false;
+    }
+
+    const scaffoldPos = position.floored();
+    while (bot.entity.position.y + 1 < scaffoldPos.y) {
+        const blockBelow = bot.blockAt(scaffoldPos.offset(0, -1, 0));
+        if (!blockBelow || blockBelow.name === 'air') {
+            await bot.equip(bot.inventory.items().find(i => i.name === CONFIG.scaffoldBlock), 'hand');
+            await bot.placeBlock(blockBelow || bot.blockAt(scaffoldPos.offset(0, -2, 0)), new Vec3(0, 1, 0));
+            await sleep(200);
+        }
+        await bot.setControlState('jump', true);
+        await sleep(200);
+        await bot.setControlState('jump', false);
+        await sleep(200);
+    }
+    return true;
+};
+
+const buildLayers = async (startLayer, count) => {
+    state.isBuilding = true;
+    
+    for (let i = 0; i < count; i++) {
+        const layer = startLayer + i;
+        if (!state.layers[layer] || !state.isBuilding) break;
+        
+        log(`Building layer ${layer}`);
+        
+        for (const block of state.layers[layer]) {
+            if (!state.isBuilding) break;
+            
+            const blockState = state.structure.palette.value.value[block.state.value];
+            const blockName = getBlockName(blockState);
+            const position = new Vec3(
+                block.pos.value[0] + state.buildPos.x,
+                block.pos.value[1] + state.buildPos.y,
+                block.pos.value[2] + state.buildPos.z
+            );
+            
+            // Build scaffold if needed
+            if (position.y > bot.entity.position.y + 2) {
+                await buildScaffold(position);
+            }
+            
+            try {
+                const item = bot.inventory.items().find(i => i.name === blockName);
+                if (!item) {
+                    log(`Missing ${blockName}, will get more later`);
+                    continue;
+                }
+                
+                await bot.equip(item, 'hand');
+                await bot.placeBlock(bot.blockAt(position), new Vec3(0, 1, 0));
+                await sleep(CONFIG.buildDelay);
+            } catch (err) {
+                log(`Building error: ${err.message}`);
+            }
+        }
+        
+        if (state.isBuilding) {
+            log(`Completed layer ${layer}`);
+            state.currentLayer++;
+        }
+    }
+    
+    state.isBuilding = false;
+};
+
+// Event handlers
+bot.once('spawn', async () => {
+    log('Bot ready!');
+    await downloadSchematic();
+});
+
+bot.on('chat', async (username, message) => {
+    if (username === bot.username) return;
+    
+    const args = message.trim().split(' ');
+    const cmd = args[0].toLowerCase();
+    
+    try {
+        switch (cmd) {
+            case '!setchest':
+                if (args.length === 4) {
+                    state.chestPos = new Vec3(+args[1], +args[2], +args[3]);
+                    log(`Chest location set at ${state.chestPos}`);
+                }
+                break;
+                
+            case '!come':
+                if (args.length === 4) {
+                    state.buildPos = new Vec3(+args[1], +args[2], +args[3]);
+                    await goToPosition(state.buildPos);
+                    log(`Arrived at build location ${state.buildPos}`);
+                }
+                break;
+                
+            case '!build':
+                if (!state.isBuilding) {
+                    if (!state.buildPos) {
+                        log('Set build position first with !come');
+                        return;
+                    }
+                    
+                    // 1. Go to chest and manage inventory
+                    const success = await manageChestInventory();
+                    if (!success) return;
+                    
+                    // 2. Go to build site and build layers
+                    await goToPosition(state.buildPos);
+                    await buildLayers(state.currentLayer, CONFIG.maxLayersPerTrip);
+                    
+                    // 3. Return to chest if more layers remain
+                    if (state.currentLayer < Object.keys(state.layers).length) {
+                        await manageChestInventory();
+                    }
+                }
+                break;
+                
+            case '!stop':
+                state.isBuilding = false;
+                log('Stopped building process');
+                break;
+                
+            case '!status':
+                log(`Current layer: ${state.currentLayer}/${Object.keys(state.layers).length}`);
+                log(`Build position: ${state.buildPos}`);
+                log(`Chest position: ${state.chestPos}`);
+                break;
+        }
+    } catch (err) {
+        log(`Command error: ${err.message}`);
+    }
+});
+
+// For Node.js <18
+const fetch = (...args) => import('node-fetch').then(({default: fetch}) => fetch(...args));
+
+// Error handling
+bot.on('error', err => log(`Bot error: ${err.message}`));
+bot.on('kicked', reason => log(`Kicked: ${reason}`));
+bot.on('end', reason => log(`Disconnected: ${reason}`));        // Calculate all required items for the entire schematic
         state.requiredItems = {};
         state.structure.blocks.value.value.forEach(block => {
             const blockState = state.structure.palette.value.value[block.state.value];
