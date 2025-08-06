@@ -22,7 +22,7 @@ const CONFIG = {
     schematicFile: 'house.nbt',
     safetyCheck: true,
     clearInventory: true,
-    requestItems: true // Enable item requesting
+    requestItems: true
 };
 
 const bot = mineflayer.createBot({
@@ -142,6 +142,145 @@ const buildStructure = async () => {
     if (state.isBuilding) {
         log('Already building!');
         return;
+    }
+
+    state.isBuilding = true;
+
+    try {
+        if (!state.buildPos || !state.structure) {
+            throw new Error('Set a build position and load schematic first');
+        }
+
+        scanInventory();
+
+        if (CONFIG.clearInventory) {
+            for (const item of bot.inventory.items()) {
+                if (!state.requiredItems[item.name]) {
+                    try {
+                        await bot.tossStack(item);
+                    } catch (err) {
+                        log(`Failed to drop ${item.name}: ${err.message}`);
+                    }
+                }
+            }
+        }
+
+        // Check for missing items before building
+        requestMissingItems();
+        if (Object.keys(state.missingItems).length > 0) {
+            log('Please provide missing items first!');
+            return;
+        }
+
+        log('Starting building process 🧱');
+
+        const blocks = state.structure.blocks.value.value;
+        const palette = state.structure.palette.value.value;
+
+        for (let i = 0; i < blocks.length; i++) {
+            const block = blocks[i];
+            const blockState = palette[block.state.value];
+            const blockName = getBlockName(blockState);
+            const position = new Vec3(
+                block.pos.value[0] + state.buildPos.x,
+                block.pos.value[1] + state.buildPos.y,
+                block.pos.value[2] + state.buildPos.z
+            );
+
+            const item = bot.inventory.items().find(it => it.name === blockName);
+            if (!item) {
+                log(`Out of ${blockName}, requesting more...`);
+                log(`/give @s ${blockName} ${state.requiredItems[blockName]}`);
+                continue;
+            }
+
+            try {
+                await bot.equip(item, 'hand');
+                const reference = bot.blockAt(position.offset(0, -1, 0));
+                if (!reference || reference.name === 'air') {
+                    log(`No support below ${position}, skipping block`);
+                    continue;
+                }
+                await bot.placeBlock(reference, new Vec3(0, 1, 0));
+                await sleep(CONFIG.buildDelay);
+            } catch (err) {
+                log(`Failed to place ${blockName} at ${position}: ${err.message}`);
+            }
+        }
+
+        log('Build complete ✅');
+    } catch (err) {
+        log(`Build failed: ${err.message}`);
+    } finally {
+        state.isBuilding = false;
+    }
+};
+
+// Event handlers
+bot.once('spawn', async () => {
+    log('Bot spawned!');
+    await downloadSchematic();
+});
+
+// Modified chat handler to properly handle async operations
+const handleChatCommand = async (username, message) => {
+    if (username === bot.username) return;
+
+    const args = message.trim().split(' ');
+    const command = args[0].toLowerCase();
+
+    try {
+        switch (command) {
+            case '!setchest':
+                if (args.length === 4) {
+                    state.chestPos = new Vec3(+args[1], +args[2], +args[3]);
+                    log(`Chest set at ${state.chestPos}`);
+                }
+                break;
+
+            case '!come':
+                if (args.length === 4) {
+                    state.buildPos = new Vec3(+args[1], +args[2], +args[3]);
+                    await goToPosition(state.buildPos);
+                }
+                break;
+
+            case '!build':
+                await buildStructure();
+                break;
+
+            case '!materials':
+                requestMissingItems();
+                break;
+
+            case '!stop':
+                state.isBuilding = false;
+                log('Stopped building');
+                break;
+
+            case '!help':
+                log('Available commands:');
+                log('!setchest x y z - Set chest location');
+                log('!come x y z - Move to build location');
+                log('!build - Start building');
+                log('!materials - Show missing materials');
+                log('!stop - Cancel building');
+                break;
+        }
+    } catch (err) {
+        log(`Error: ${err.message}`);
+    }
+};
+
+bot.on('chat', (username, message) => {
+    handleChatCommand(username, message).catch(err => {
+        log(`Command processing error: ${err.message}`);
+    });
+});
+
+bot.on('error', err => log(`Bot error: ${err.message}`));
+bot.on('kicked', reason => log(`Kicked: ${reason}`));
+bot.on('end', reason => log(`Disconnected: ${reason}`));        return;
     }
 
     state.isBuilding = true;
