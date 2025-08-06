@@ -51,7 +51,7 @@ const getBlockName = (blockState) => {
 };
 
 const goToPosition = async (position) => {
-    const mcData = bot.mcData; // Use the pre-loaded mcData
+    const mcData = bot.mcData;
     const movements = new Movements(bot, mcData);
     bot.pathfinder.setMovements(movements);
     bot.pathfinder.setGoal(new GoalNear(position.x, position.y, position.z, 1));
@@ -111,7 +111,6 @@ const fillInventoryFromChest = async () => {
     try {
         log(`Searching for a chest within a ${CONFIG.chestSearchRadius} block radius of ${state.chestPos.x}, ${state.chestPos.y}, ${state.chestPos.z}...`);
         
-        // Search for the nearest chest using the loaded mcData
         const chestBlock = bot.findBlock({
             matching: bot.mcData.blocksByName.chest.id,
             maxDistance: CONFIG.chestSearchRadius,
@@ -122,7 +121,6 @@ const fillInventoryFromChest = async () => {
             throw new Error('No chest found in the specified radius.');
         }
 
-        // Go to the found chest's position
         await goToPosition(chestBlock.position);
 
         const chest = await bot.openChest(chestBlock);
@@ -216,7 +214,7 @@ const buildStructure = async () => {
 
 // Event handlers
 bot.once('spawn', async () => {
-    bot.mcData = mcDataLoader(bot.version); // Load mcData and attach it to the bot object
+    bot.mcData = mcDataLoader(bot.version);
     log('Bot ready!');
     await downloadSchematic();
 });
@@ -244,6 +242,52 @@ bot.on('chat', (username, message) => {
                         state.buildPos = new Vec3(+args[1], +args[2], +args[3]);
                         log(`Going to build location ${state.buildPos.x}, ${state.buildPos.y}, ${state.buildPos.z}`);
                         await goToPosition(state.buildPos);
+                        log('Arrived at build location');
+                    } else {
+                         log('Usage: !come <x> <y> <z>');
+                    }
+                    break;
+
+                case '!build':
+                    await buildStructure();
+                    break;
+
+                case '!stop':
+                    state.isBuilding = false;
+                    log('Stopped building');
+                    break;
+
+                case '!materials':
+                    if (Object.keys(state.requiredItems).length > 0) {
+                        const materialsList = [];
+                        for (const [name, count] of Object.entries(state.requiredItems)) {
+                             const actualItemNames = specialItems[name] || [name];
+                             const displayNames = Array.isArray(actualItemNames) ? actualItemNames.join(' & ') : actualItemNames;
+                             materialsList.push(`${displayNames}: ${count}`);
+                        }
+                        log(materialsList.join(', '));
+                    } else {
+                        log('Schematic not loaded or has no blocks.');
+                    }
+                    break;
+
+                case '!help':
+                    log('Available commands: !setchest <x y z>, !come <x y z>, !build, !stop, !materials, !help');
+                    break;
+            }
+        } catch (err) {
+            log(`Command error: ${err.message}`);
+        }
+    })();
+});
+
+// For Node.js <18
+const fetch = (...args) => import('node-fetch').then(({default: fetch}) => fetch(...args));
+
+// Error handling
+bot.on('error', err => log(`Bot error: ${err.message}`));
+bot.on('kicked', reason => log(`Kicked: ${reason}`));
+bot.on('end', reason => log(`Disconnected: ${reason}`));                        await goToPosition(state.buildPos);
                         log('Arrived at build location');
                     } else {
                          log('Usage: !come <x> <y> <z>');
