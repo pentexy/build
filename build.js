@@ -160,25 +160,32 @@ const getItemsFromSource = async (itemName, amount) => {
 const manageChestItems = async () => {
     if (!state.chestPos) {
         log('No chest set. Cannot manage inventory.');
-        return;
+        return false;
     }
     
     try {
         await goToPosition(state.chestPos);
         const chestBlock = bot.blockAt(state.chestPos);
-        if (chestBlock && chestBlock.name === 'chest') {
-            const chest = await bot.openChest(chestBlock);
-            for (const item of bot.inventory.items()) {
-                if (!state.requiredItems[item.name]) {
-                    await chest.deposit(item.type, null, item.count);
-                    await sleep(100); 
-                }
-            }
-            await chest.close();
-            log('Inventory organized. Excess items placed in chest.');
+
+        if (!chestBlock || chestBlock.name !== 'chest') {
+            log(`ERROR: No chest found at coordinates ${state.chestPos.x}, ${state.chestPos.y}, ${state.chestPos.z}.`);
+            return false;
         }
+
+        const chest = await bot.openChest(chestBlock);
+        
+        for (const item of bot.inventory.items()) {
+            if (!state.requiredItems[item.name]) {
+                await chest.deposit(item.type, null, item.count);
+                await sleep(100); 
+            }
+        }
+        await chest.close();
+        log('Inventory organized. Excess items placed in chest.');
+        return true;
     } catch (err) {
-        log(`Inventory management failed: ${err.message}`);
+        log(`ERROR: Inventory management failed: ${err.message}`);
+        return false;
     }
 };
 
@@ -190,7 +197,6 @@ const gatherAllMaterials = async () => {
         if (!state.chestPos) {
             throw new Error('Please set a chest location first using !setchest <x> <y> <z>');
         }
-        await goToPosition(state.chestPos);
         
         log('Starting material gathering. I will use /give to get materials and store them in the chest.');
 
@@ -201,8 +207,13 @@ const gatherAllMaterials = async () => {
                 const toGive = Math.min(needed - have, CONFIG.giveAmount);
                 log(`Giving myself ${toGive} of ${name}...`);
                 bot.chat(`/give @s ${name} ${toGive}`);
-                await sleep(2000); // Wait for item to appear
-                await manageChestItems();
+                await sleep(2000); 
+                
+                const success = await manageChestItems();
+                if (!success) {
+                    throw new Error(`Failed to manage chest. Cannot continue gathering materials for ${name}.`);
+                }
+                
                 have = await getCombinedItemCount(name);
             }
         }
@@ -215,7 +226,6 @@ const gatherAllMaterials = async () => {
         state.isBuilding = false;
     }
 };
-
 const buildStructure = async () => {
     if (state.isBuilding) return;
     state.isBuilding = true;
