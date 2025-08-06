@@ -13,11 +13,11 @@ const fetch = (...args) => import('node-fetch').then(({default: fetch}) => fetch
 
 // Configuration
 const CONFIG = {
-    host: 'sanctity-dial.ap.e4mc.link',
+    host: 'localhost',
     port: 25565,
     username: 'BuilderBot',
     buildDelay: 100, // Delay between placing blocks
-    maxRetries: 3,
+    maxRetries: 3, // Max retries for general operations (not specific to layers now)
     schematicUrl: 'https://files.catbox.moe/r7z2gh.nbt', // URL to your schematic
     schematicFile: 'house.nbt', // Local file name for schematic
     safetyCheck: true, // Not fully implemented, but good to have
@@ -77,10 +77,13 @@ const goToPosition = async (position, distance = 1) => {
     // Wait until the bot is close enough to the target position
     await new Promise((resolve) => {
         const checkArrival = setInterval(() => {
+            // Check if the bot is within the desired distance
             if (bot.entity.position.distanceTo(position) <= distance + 0.5) {
                 clearInterval(checkArrival);
                 resolve();
             }
+            // Add a timeout to prevent infinite waiting if path is blocked
+            // (More advanced error handling for pathfinding could be added here)
         }, 500);
     });
 };
@@ -125,10 +128,14 @@ const manageInventory = async (chestPosition, itemsToWithdraw) => {
     }
     
     try {
-        await goToPosition(chestPosition);
+        // Go very close to the chest block
+        await goToPosition(chestPosition, 1); 
         const chestBlock = bot.blockAt(chestPosition);
-        if (!chestBlock) {
-            throw new Error('Chest not found at specified position.');
+
+        // Explicitly check if the block exists and is a chest
+        if (!chestBlock || chestBlock.name !== 'chest') {
+            log(`Error: No chest found at ${chestPosition.x}, ${chestPosition.y}, ${chestPosition.z}. Found: ${chestBlock ? chestBlock.name : 'nothing'}`);
+            return false;
         }
         
         await faceBlock(chestBlock.position); // Face the chest before opening
@@ -136,9 +143,8 @@ const manageInventory = async (chestPosition, itemsToWithdraw) => {
         
         log('Managing inventory...');
 
-        // 1. Deposit all non-building items (items not in state.requiredItems)
+        // 1. Deposit all non-building items (items not in state.requiredItems and not scaffolding)
         for (const item of bot.inventory.items()) {
-            // Only deposit if it's not a required item for the entire build
             if (!state.requiredItems[item.name] && item.name !== CONFIG.scaffoldingBlock) {
                 try {
                     await chest.deposit(item.type, null, item.count);
@@ -184,9 +190,10 @@ const collectNearbyItems = async () => {
     const items = Object.values(bot.entities).filter(e => e.type === 'item');
     let collectedCount = 0;
     for (const item of items) {
-        const itemName = item.name || (item.metadata[item.metadata.length - 1] && item.metadata[item.metadata.length - 1].nbt && item.metadata[item.metadata.length - 1].nbt.value.item && item.metadata[item.metadata.length - 1].nbt.value.item.value.id.value.split(':')[1]);
-        if (itemName && state.requiredItems[itemName]) {
-            log(`Going to collect ${itemName} at ${item.position.x}, ${item.position.y}, ${item.position.z}`);
+        // Use item.name directly, assuming it's usually available.
+        // The more complex NBT parsing is generally for specific item data, not just name.
+        if (item.name && state.requiredItems[item.name]) { 
+            log(`Going to collect ${item.name} at ${item.position.x}, ${item.position.y}, ${item.position.z}`);
             await goToPosition(item.position, 2); // Go close to the item
             await sleep(500); // Wait for item collection animation
             collectedCount++;
@@ -218,61 +225,74 @@ const calculateItemsForLayers = (minY, maxY) => {
 
 // Places scaffolding blocks to reach higher positions
 const placeScaffolding = async (targetPos) => {
-    const botY = bot.entity.position.y;
+    const botCurrentY = bot.entity.position.y;
     const targetBlockY = targetPos.y;
-    const diffY = targetBlockY - botY;
+    const horizontalDistance = bot.entity.position.distanceTo(targetPos.clone().setY(botCurrentY));
 
-    // If the target block is more than 1.5 blocks above the bot, or if it's too far horizontally
-    if (diffY > 1.5 || bot.entity.position.distanceTo(targetPos) > 4) {
-        log(`Placing scaffolding to reach ${targetPos.x}, ${targetPos.y}, ${targetPos.z}`);
+    // If target is significantly higher (more than 2 blocks) or too far horizontally (more than 3 blocks)
+    if (targetBlockY > botCurrentY + 2 || horizontalDistance > 3) {
+        log(`Scaffolding needed to reach Y: ${targetBlockY} (Bot Y: ${botCurrentY.toFixed(1)}, Horiz Dist: ${horizontalDistance.toFixed(1)})`);
         
         const scaffoldingItem = bot.inventory.items().find(i => i.name === CONFIG.scaffoldingBlock);
         if (!scaffoldingItem) {
-            log(`Error: No ${CONFIG.scaffoldingBlock} in inventory for scaffolding!`);
+            log(`Error: No ${CONFIG.scaffoldingBlock} in inventory for scaffolding! Cannot reach target.`);
             return false;
         }
 
-        // Determine a good scaffolding position (e.g., directly below or next to target)
-        let currentScaffoldY = botY -1;
-        while (currentScaffoldY < targetBlockY - 1) { // Build up to one block below target
-            let placePos = new Vec3(targetPos.x, currentScaffoldY, targetPos.z);
-            let blockAtPos = bot.blockAt(placePos);
+        // Filter out scaffolding blocks that are already below the bot's current Y, as they might be removed or no longer relevant.
+        state.scaffoldingBlocks = state.scaffoldingBlocks.filter(pos => pos.y >= botCurrentY - 1);
 
-            if (blockAtPos.name === 'air') {
+        let currentScaffoldHeight = Math.floor(botCurrentY); // Start building from bot's current Y level
+        const botX = Math.floor(bot.entity.position.x);
+        const botZ = Math.floor(bot.entity.position.z);
+
+        while (currentScaffoldHeight < targetBlockY - 1) { // Build up to one block below the target block
+            const scaffoldBlockPos = new Vec3(botX, currentScaffoldHeight, botZ);
+            const blockAtScaffoldPos = bot.blockAt(scaffoldBlockPos);
+
+            if (blockAtScaffoldPos.name === 'air') { // If the spot is empty, place a block
                 try {
-                    await goToPosition(placePos.offset(0, -1, 0), 2); // Go near the base of the scaffold
-                    await bot.equip(scaffoldingItem, 'hand');
-                    const supportBlock = bot.blockAt(placePos.offset(0, -1, 0));
-                    if (!supportBlock || supportBlock.name === 'air') {
-                        // If no support below, try to place next to current bot position
-                        const tempSupportPos = bot.entity.position.offset(0, -1, 0);
-                        const tempSupportBlock = bot.blockAt(tempSupportPos);
-                        if (tempSupportBlock && tempSupportBlock.name !== 'air') {
-                            await bot.placeBlock(tempSupportBlock, new Vec3(0, 1, 0));
-                            state.scaffoldingBlocks.push(tempSupportPos.offset(0, 1, 0));
-                            await sleep(CONFIG.buildDelay);
+                    // Go to a position where the bot can place the scaffolding block
+                    // This often means standing on the block below the target scaffolding spot
+                    const referenceBlockForScaffold = bot.blockAt(scaffoldBlockPos.offset(0, -1, 0));
+                    if (!referenceBlockForScaffold || referenceBlockForScaffold.name === 'air') {
+                        // If no direct support below, try to find an adjacent block to stand on
+                        log(`No direct support for scaffolding at ${scaffoldBlockPos}, trying to find adjacent support.`);
+                        const adjacentBlock = bot.blockAt(scaffoldBlockPos.offset(1, -1, 0)); // Example: try one block to the side
+                        if (adjacentBlock && adjacentBlock.name !== 'air') {
+                            await goToPosition(adjacentBlock.position, 1);
                         } else {
-                            log('Cannot find a suitable support for scaffolding.');
-                            return false;
+                            log(`Could not find a suitable reference block to place scaffolding at ${scaffoldBlockPos}.`);
+                            return false; // Cannot place scaffolding
                         }
                     } else {
-                        await bot.placeBlock(supportBlock, new Vec3(0, 1, 0));
-                        state.scaffoldingBlocks.push(placePos);
-                        await sleep(CONFIG.buildDelay);
+                        await goToPosition(referenceBlockForScaffold.position, 1); // Stand on the block below
                     }
-                    currentScaffoldY++;
+                   
+                    await bot.equip(scaffoldingItem, 'hand');
+                    await bot.placeBlock(bot.blockAt(scaffoldBlockPos.offset(0, -1, 0)), new Vec3(0, 1, 0)); // Place on top of the reference
+                    state.scaffoldingBlocks.push(scaffoldBlockPos);
+                    log(`Placed scaffolding at ${scaffoldBlockPos}`);
+                    await sleep(CONFIG.buildDelay);
+                    currentScaffoldHeight++;
                 } catch (err) {
-                    log(`Failed to place scaffolding at ${placePos}: ${err.message}`);
+                    log(`Failed to place scaffolding block at ${scaffoldBlockPos}: ${err.message}`);
                     return false;
                 }
             } else {
-                currentScaffoldY++; // Block already exists, move up
+                currentScaffoldHeight++; // Block already exists, move up
             }
         }
+        // After placing scaffolding, try to move bot to the top of the scaffolding
+        // This uses pathfinder to climb the placed scaffolding
+        const targetScaffoldTop = new Vec3(botX, currentScaffoldHeight + 1, botZ);
+        await goToPosition(targetScaffoldTop, 0.5); // Move to top of scaffolding
+        log(`Climbed to Y: ${bot.entity.position.y.toFixed(1)}`);
         return true;
     }
     return true; // No scaffolding needed
 };
+
 
 // Removes placed scaffolding blocks
 const removeScaffolding = async () => {
@@ -324,104 +344,127 @@ const buildStructure = async () => {
         for (let currentLayerY = minSchematicY; currentLayerY <= maxSchematicY; currentLayerY += CONFIG.layerHeight) {
             if (!state.isBuilding) {
                 log('Building stopped by command.');
-                break;
+                break; // Break outer loop if stop command is issued
             }
 
             const nextLayerY = currentLayerY + CONFIG.layerHeight;
             log(`Preparing for layers Y: ${currentLayerY} to ${nextLayerY - 1}`);
 
-            // Calculate items needed for the current set of layers
-            const itemsForCurrentLayers = calculateItemsForLayers(currentLayerY, nextLayerY);
-            
-            // Go to chest and manage inventory for these layers
-            const inventoryReady = await manageInventory(state.chestPos, itemsForCurrentLayers);
-            if (!inventoryReady) {
-                log('Failed to get required items for current layers. Retrying...');
-                // Optionally add retry logic or wait for user to provide items
-                await sleep(5000); // Wait 5 seconds before next attempt
-                continue;
-            }
-            scanInventory(); // Rescan after inventory management
+            let needsMoreItemsForLayer = true; // Flag to control re-attempting layer
+            let retryCount = 0;
+            const MAX_LAYER_RETRIES = 5; // Prevent infinite loops if items are truly unavailable
 
-            // Filter blocks for the current layers
-            const blocksInCurrentLayers = blocks.filter(block =>
-                block.pos.value[1] >= currentLayerY && block.pos.value[1] < nextLayerY
-            );
+            while (needsMoreItemsForLayer && retryCount < MAX_LAYER_RETRIES) {
+                needsMoreItemsForLayer = false; // Assume success for this attempt
+                retryCount++;
 
-            for (const block of blocksInCurrentLayers) {
-                if (!state.isBuilding) break;
+                // Calculate items needed for the current set of layers
+                const itemsForCurrentLayers = calculateItemsForLayers(currentLayerY, nextLayerY);
+                
+                // Go to chest and manage inventory for these layers
+                const inventoryReady = await manageInventory(state.chestPos, itemsForCurrentLayers);
+                if (!inventoryReady) {
+                    log(`Failed to get required items for layers Y: ${currentLayerY} to ${nextLayerY - 1}. Retrying (${retryCount}/${MAX_LAYER_RETRIES})...`);
+                    needsMoreItemsForLayer = true; // Need to retry
+                    await sleep(5000); // Wait before next attempt
+                    continue; // Continue while loop to retry inventory
+                }
+                scanInventory(); // Rescan after inventory management
 
-                const blockState = palette[block.state.value];
-                const blockName = getBlockName(blockState);
-                const position = new Vec3(
-                    block.pos.value[0] + state.buildPos.x,
-                    block.pos.value[1] + state.buildPos.y,
-                    block.pos.value[2] + state.buildPos.z
+                // Filter blocks for the current layers
+                const blocksInCurrentLayers = blocks.filter(block =>
+                    block.pos.value[1] >= currentLayerY && block.pos.value[1] < nextLayerY
                 );
 
-                // Check if the block already exists and is correct
-                const existingBlock = bot.blockAt(position);
-                if (existingBlock && existingBlock.name === blockName) {
-                    // log(`Block ${blockName} at ${position} already exists.`);
-                    continue; // Skip if already placed
-                }
-                
-                // Ensure bot has the item
-                const item = bot.inventory.items().find(i => i.name === blockName);
-                if (!item) {
-                    log(`Out of ${blockName} for ${position}. Returning to chest.`);
-                    // This means we ran out mid-layer. Break and restart layer process.
-                    break;
-                }
+                for (const block of blocksInCurrentLayers) {
+                    if (!state.isBuilding) break; // If stop command issued, break all loops
 
-                // Go to position and place scaffolding if needed
-                await goToPosition(position, 4); // Go generally near the target
-                const scaffoldingNeeded = await placeScaffolding(position);
-                if (!scaffoldingNeeded) {
-                    log(`Could not place scaffolding for ${position}. Skipping block.`);
-                    continue;
-                }
+                    const blockState = palette[block.state.value];
+                    const blockName = getBlockName(blockState);
+                    const position = new Vec3(
+                        block.pos.value[0] + state.buildPos.x,
+                        block.pos.value[1] + state.buildPos.y,
+                        block.pos.value[2] + state.buildPos.z
+                    );
 
-                try {
-                    await bot.equip(item, 'hand');
+                    // Check if the block already exists and is correct
+                    const existingBlock = bot.blockAt(position);
+                    if (existingBlock && existingBlock.name === blockName) {
+                        continue; // Skip if already placed
+                    }
                     
-                    // Find a reference block to place on
-                    let referenceBlock = bot.blockAt(position.offset(0, -1, 0)); // Try directly below
-                    if (!referenceBlock || referenceBlock.name === 'air') {
-                        // If no block directly below, try adjacent blocks on the same Y-level
-                        const potentialReferences = [
-                            position.offset(1, 0, 0), position.offset(-1, 0, 0),
-                            position.offset(0, 0, 1), position.offset(0, 0, -1)
-                        ];
-                        for (const refPos of potentialReferences) {
-                            const b = bot.blockAt(refPos);
-                            if (b && b.name !== 'air') {
-                                referenceBlock = b;
-                                break;
+                    // Ensure bot has the item
+                    const item = bot.inventory.items().find(i => i.name === blockName);
+                    if (!item) {
+                        log(`Out of ${blockName} for ${position}. Need to get more items for this layer. Restarting layer process.`);
+                        needsMoreItemsForLayer = true; // Set flag to retry this layer
+                        break; // Break inner block loop to go to outer while loop
+                    }
+
+                    // Go to position and place scaffolding if needed
+                    await goToPosition(position, 4); // Go generally near the target
+                    const scaffoldingNeeded = await placeScaffolding(position);
+                    if (!scaffoldingNeeded) {
+                        log(`Could not place scaffolding for ${position}. Skipping block.`);
+                        continue; // Skip this block, but continue with the layer
+                    }
+
+                    try {
+                        await bot.equip(item, 'hand');
+                        
+                        // Find a reference block to place on
+                        let referenceBlock = bot.blockAt(position.offset(0, -1, 0)); // Try directly below
+                        if (!referenceBlock || referenceBlock.name === 'air') {
+                            // If no block directly below, try adjacent blocks on the same Y-level
+                            const potentialReferences = [
+                                position.offset(1, 0, 0), position.offset(-1, 0, 0),
+                                position.offset(0, 0, 1), position.offset(0, 0, -1)
+                            ];
+                            for (const refPos of potentialReferences) {
+                                const b = bot.blockAt(refPos);
+                                if (b && b.name !== 'air') {
+                                    referenceBlock = b;
+                                    break;
+                                }
                             }
                         }
+
+                        if (!referenceBlock || referenceBlock.name === 'air') {
+                            log(`No suitable reference block found for ${blockName} at ${position}. Skipping.`);
+                            continue;
+                        }
+
+                        // Calculate face to place on (usually top of reference block)
+                        const faceVector = position.minus(referenceBlock.position);
+
+                        await bot.placeBlock(referenceBlock, faceVector);
+                        log(`Placed ${blockName} at ${position.x}, ${position.y}, ${position.z}`);
+                        await sleep(CONFIG.buildDelay);
+                    } catch (err) {
+                        log(`Building error at ${position}: ${err.message}`);
+                        // Consider retrying or skipping this block
+                    } finally {
+                        // Always try to remove scaffolding after placing the block
+                        await removeScaffolding();
                     }
+                } // End of blocksInCurrentLayers loop
 
-                    if (!referenceBlock || referenceBlock.name === 'air') {
-                        log(`No suitable reference block found for ${blockName} at ${position}. Skipping.`);
-                        continue;
-                    }
-
-                    // Calculate face to place on (usually top of reference block)
-                    const faceVector = position.minus(referenceBlock.position);
-
-                    await bot.placeBlock(referenceBlock, faceVector);
-                    log(`Placed ${blockName} at ${position.x}, ${position.y}, ${position.z}`);
-                    await sleep(CONFIG.buildDelay);
-                } catch (err) {
-                    log(`Building error at ${position}: ${err.message}`);
-                    // Consider retrying or skipping this block
-                } finally {
-                    // Always try to remove scaffolding after placing the block
-                    await removeScaffolding();
+                if (needsMoreItemsForLayer) {
+                    // If we broke out of the inner loop due to missing items,
+                    // the while loop will re-run for the same layer.
+                    log(`Re-attempting layer Y: ${currentLayerY} due to missing items.`);
+                } else {
+                    // If we completed the inner loop without needing more items,
+                    // then this layer is done, and the while loop can exit.
+                    log(`Completed layer Y: ${currentLayerY} to ${nextLayerY - 1}.`);
                 }
+            } // End of while (needsMoreItemsForLayer) loop
+
+            if (retryCount >= MAX_LAYER_RETRIES && needsMoreItemsForLayer) {
+                log(`Max retries (${MAX_LAYER_RETRIES}) reached for layers Y: ${currentLayerY} to ${nextLayerY - 1}. Cannot complete this section due to persistent missing items.`);
+                break; // Break the outer for loop if max retries reached
             }
-        }
+        } // End of currentLayerY loop
 
         log('Build complete ✅');
     } catch (err) {
