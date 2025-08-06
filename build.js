@@ -8,21 +8,17 @@ const mcDataLoader = require('minecraft-data');
 const { promisify } = require('util');
 const sleep = promisify(setTimeout);
 
-// For Node.js <18
-const fetch = (...args) => import('node-fetch').then(({default: fetch}) => fetch(...args));
-
 // Configuration
 const CONFIG = {
     host: 'unholy-engraved.ap.e4mc.link',
     port: 25565,
     username: 'BuilderBot',
     buildDelay: 100,
-    maxRetries: 3,
     schematicUrl: 'https://files.catbox.moe/r7z2gh.nbt',
-    schematicFile: 'house.nbt',
-    safetyCheck: true,
-    clearInventory: false,
-    requestItems: true
+    layers: {
+        collectThreshold: 32, // Items to collect before building layer
+        maxLayerItems: 64     // Max items to carry per layer
+    }
 };
 
 const bot = mineflayer.createBot({
@@ -37,27 +33,18 @@ const state = {
     chestPos: null,
     buildPos: null,
     structure: null,
-    requiredItems: {},
-    inventoryItems: {},
+    currentLayer: 0,
     isBuilding: false,
-    isCollecting: false,
-    missingItems: {}
+    isCollecting: false
 };
 
 // Helper functions
 const log = (message) => {
-    console.log(`[${new Date().toISOString()}] ${message}`);
-    if (bot && bot.chat) bot.chat(message);
+    console.log(`[BuilderBot] ${message}`);
+    bot.chat(message);
 };
 
 const getBlockName = (state) => state.Name.value.split(':')[1] || state.Name.value;
-
-const scanInventory = () => {
-    state.inventoryItems = {};
-    bot.inventory.items().forEach(item => {
-        state.inventoryItems[item.name] = (state.inventoryItems[item.name] || 0) + item.count;
-    });
-};
 
 const goToPosition = async (position, distance = 1) => {
     const mcData = mcDataLoader(bot.version);
@@ -79,69 +66,180 @@ const downloadSchematic = async () => {
     try {
         log('Downloading schematic...');
         const res = await fetch(CONFIG.schematicUrl);
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        
         const buffer = await res.buffer();
-        fs.writeFileSync(CONFIG.schematicFile, buffer);
+        fs.writeFileSync('schematic.nbt', buffer);
         
         const data = await nbt.parse(buffer);
         state.structure = data.parsed.value;
-
-        // Calculate required items
-        state.requiredItems = {};
-        state.structure.blocks.value.value.forEach(block => {
-            const blockState = state.structure.palette.value.value[block.state.value];
-            const name = getBlockName(blockState);
-            state.requiredItems[name] = (state.requiredItems[name] || 0) + 1;
-        });
-
         log('Schematic loaded ✅');
     } catch (err) {
-        log(`Failed to load schematic: ${err.message}`);
+        log(`Schematic error: ${err.message}`);
     }
 };
 
-const manageInventory = async () => {
-    if (!state.chestPos) return false;
+const organizeInventory = async () => {
+    if (!state.chestPos) return;
+    
+    await goToPosition(state.chestPos);
+    const chest = await bot.openChest(bot.blockAt(state.chestPos));
+    
+    // Deposit non-essential items
+    for (const item of bot.inventory.items()) {
+        if (!isNeededForCurrentLayer(item.name)) {
+            await chest.deposit(item.type, null, item.count);
+        }
+    }
+    await chest.close();
+};
+
+const isNeededForCurrentLayer = (itemName) => {
+    if (!state.structure) return false;
+    
+    const blocks = state.structure.blocks.value.value;
+    const palette = state.structure.palette.value.value;
+    
+    return blocks.some(block => {
+        const y = block.pos.value[1];
+        if (Math.floor(y) !== state.currentLayer) return false;
+        
+        const blockState = palette[block.state.value];
+        return getBlockName(blockState) === itemName;
+    });
+};
+
+const collectLayerItems = async () => {
+    state.isCollecting = true;
+    
+    // 1. Get items from chest first
+    if (state.chestPos) {
+        await goToPosition(state.chestPos);
+        const chest = await bot.openChest(bot.blockAt(state.chestPos));
+        
+        for (const item of chest.items()) {
+            if (isNeededForCurrentLayer(item.name)) {
+                const toWithdraw = Math.min(item.count, CONFIG.layers.maxLayerItems);
+                await chest.withdraw(item.type, null, toWithdraw);
+            }
+        }
+        await chest.close();
+    }
+    
+    // 2. Collect nearby floating items
+    const items = Object.values(bot.entities).filter(e => 
+        e.type === 'item' && isNeededForCurrentLayer(e.name)
+    );
+    
+    for (const item of items) {
+        await goToPosition(item.position, 2);
+        await sleep(500); // Wait for collection
+    }
+    
+    state.isCollecting = false;
+};
+
+const buildCurrentLayer = async () => {
+    if (!state.structure || !state.buildPos) return;
+    
+    state.isBuilding = true;
+    const blocks = state.structure.blocks.value.value;
+    const palette = state.structure.palette.value.value;
+    
+    // Filter blocks for current layer
+    const layerBlocks = blocks.filter(block => 
+        Math.floor(block.pos.value[1]) === state.currentLayer
+    );
+    
+    for (const block of layerBlocks) {
+        if (!state.isBuilding) break;
+        
+        const blockState = palette[block.state.value];
+        const blockName = getBlockName(blockState);
+        const position = new Vec3(
+            block.pos.value[0] + state.buildPos.x,
+            block.pos.value[1] + state.buildPos.y,
+            block.pos.value[2] + state.buildPos.z
+        );
+        
+        try {
+            const item = bot.inventory.items().find(i => i.name === blockName);
+            if (!item) {
+                log(`Missing ${blockName}, collecting more...`);
+                await collectLayerItems();
+                continue;
+            }
+            
+            await bot.equip(item, 'hand');
+            await bot.placeBlock(bot.blockAt(position), new Vec3(0, 1, 0));
+            await sleep(CONFIG.buildDelay);
+        } catch (err) {
+            log(`Building error: ${err.message}`);
+        }
+    }
+    
+    if (state.isBuilding) {
+        log(`Layer ${state.currentLayer} complete!`);
+        state.currentLayer++;
+    }
+    state.isBuilding = false;
+};
+
+// Event handlers
+bot.once('spawn', async () => {
+    log('Bot ready!');
+    await downloadSchematic();
+});
+
+bot.on('chat', async (username, message) => {
+    if (username === bot.username) return;
+    
+    const args = message.trim().split(' ');
+    const cmd = args[0].toLowerCase();
     
     try {
-        await goToPosition(state.chestPos);
-        const chestBlock = bot.blockAt(state.chestPos);
-        if (!chestBlock) throw new Error('Chest not found');
-        
-        const chest = await bot.openChest(chestBlock);
-        
-        // Deposit non-building items
-        for (const item of bot.inventory.items()) {
-            if (!state.requiredItems[item.name]) {
-                try {
-                    await chest.deposit(item.type, null, item.count);
-                    log(`Deposited ${item.count}x ${item.name} to chest`);
-                } catch (err) {
-                    log(`Failed to deposit ${item.name}: ${err.message}`);
+        switch (cmd) {
+            case '!setchest':
+                if (args.length === 4) {
+                    state.chestPos = new Vec3(+args[1], +args[2], +args[3]);
+                    log(`Chest location set`);
                 }
-            }
-        }
-        
-        // Withdraw needed items
-        scanInventory();
-        for (const [name, needed] of Object.entries(state.requiredItems)) {
-            const have = state.inventoryItems[name] || 0;
-            if (have < needed) {
-                const items = chest.items().filter(i => i.name === name);
-                if (items.length > 0) {
-                    const toTake = Math.min(needed - have, items[0].count);
-                    await chest.withdraw(items[0].type, null, toTake);
-                    log(`Withdrew ${toTake}x ${name} from chest`);
+                break;
+                
+            case '!come':
+                if (args.length === 4) {
+                    state.buildPos = new Vec3(+args[1], +args[2], +args[3]);
+                    await goToPosition(state.buildPos);
                 }
-            }
+                break;
+                
+            case '!build':
+                if (!state.isBuilding) {
+                    state.currentLayer = 0;
+                    await buildCurrentLayer();
+                }
+                break;
+                
+            case '!nextlayer':
+                if (!state.isBuilding) {
+                    await buildCurrentLayer();
+                }
+                break;
+                
+            case '!stop':
+                state.isBuilding = false;
+                log('Stopped building');
+                break;
         }
-        
-        await chest.close();
-        return true;
     } catch (err) {
-        log(`Chest error: ${err.message}`);
-        return false;
+        log(`Error: ${err.message}`);
+    }
+});
+
+// Auto-collect nearby items periodically
+setInterval(async () => {
+    if (!state.isBuilding && !state.isCollecting) {
+        await collectLayerItems();
+    }
+}, 15000);        return false;
     }
 };
 
