@@ -14,11 +14,11 @@ const agent = new https.Agent({
 
 // Configuration
 const CONFIG = {
-    host: 'drone-broadness.sg.e4mc.link',
+    host: '54.151.198.24',
     port: 25565,
     username: 'BuilderBot',
     buildDelay: 200,
-    schematicUrl: 'https://files.catbox.moe/r7z2gh.nbt',
+    schematicUrl: 'https://files.catbox.moe/q1kime.nbt',
     chestSearchRadius: 10,
 };
 
