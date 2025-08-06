@@ -13,7 +13,7 @@ const fetch = (...args) => import('node-fetch').then(({default: fetch}) => fetch
 
 // Configuration
 const CONFIG = {
-    host: 'localhost',
+    host: '18.143.129.103',
     port: 25565,
     username: 'BuilderBot',
     buildDelay: 100, // Delay between placing blocks
