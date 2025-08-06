@@ -109,10 +109,22 @@ const downloadSchematic = async () => {
 const giveItem = async (itemName, amount) => {
     log(`Giving myself ${amount} of ${itemName}...`);
     bot.chat(`/give @s ${itemName} ${amount}`);
-    await sleep(1000); // Give some time for the command to process and item to appear
-    scanInventory();
-};
 
+    const startTime = Date.now();
+    const timeout = 10000; // 10 seconds timeout
+
+    while (Date.now() - startTime < timeout) {
+        scanInventory();
+        const item = bot.inventory.findInventoryItem(mcDataLoader(bot.version).blocksByName[itemName].id, null, false);
+        if (item) {
+            log(`Successfully received ${itemName}.`);
+            return;
+        }
+        await sleep(500); // Check every half a second
+    }
+
+    throw new Error(`Timeout: Failed to get item: ${itemName}`);
+};
 const organizeInventory = async () => {
     if (!state.chestPos) {
         log('No chest set. Cannot organize inventory.');
