@@ -77,6 +77,45 @@ const goToPosition = async (position) => {
     });
 };
 
+const getSingleItemFromChest = async (itemName) => {
+    if (!state.chestPos) {
+        throw new Error('No chest set. Cannot get items.');
+    }
+
+    try {
+        // Go to the chest location
+        await goToPosition(state.chestPos);
+        
+        // Search for the nearest chest
+        const chestBlock = bot.findBlock({
+            matching: bot.mcData.blocksByName.chest.id,
+            maxDistance: CONFIG.chestSearchRadius,
+            point: state.chestPos
+        });
+
+        if (!chestBlock) {
+            throw new Error('No chest found in the specified radius.');
+        }
+
+        const chest = await bot.openChest(chestBlock);
+        log(`Searching for ${itemName} in chest...`);
+        
+        const itemToWithdraw = chest.container.find(item => item.name === itemName);
+
+        if (itemToWithdraw) {
+            await chest.withdraw(itemToWithdraw.type, null, 1);
+            log(`Withdrew 1 ${itemName} from chest.`);
+        } else {
+            log(`Could not find ${itemName} in chest.`);
+        }
+        
+        await chest.close();
+        await sleep(1000); 
+    } catch (err) {
+        throw new Error(`Failed to get item from chest: ${err.message}`);
+    }
+};
+
 const downloadSchematic = async () => {
     try {
         log('Downloading schematic...');
@@ -103,44 +142,6 @@ const downloadSchematic = async () => {
     }
 };
 
-const fillInventoryFromChest = async () => {
-    if (!state.chestPos) {
-        throw new Error('No chest set. Cannot get items.');
-    }
-
-    try {
-        log(`Searching for a chest within a ${CONFIG.chestSearchRadius} block radius of ${state.chestPos.x}, ${state.chestPos.y}, ${state.chestPos.z}...`);
-        
-        const chestBlock = bot.findBlock({
-            matching: bot.mcData.blocksByName.chest.id,
-            maxDistance: CONFIG.chestSearchRadius,
-            point: state.chestPos
-        });
-
-        if (!chestBlock) {
-            throw new Error('No chest found in the specified radius.');
-        }
-
-        await goToPosition(chestBlock.position);
-
-        const chest = await bot.openChest(chestBlock);
-        log('Transferring items from chest to inventory...');
-        
-        for (let i = 0; i < 9; i++) {
-            const item = chest.slots[i];
-            if (item) {
-                await chest.withdraw(item.type, null, item.count);
-                await sleep(100);
-            }
-        }
-        await chest.close();
-        log('Inventory filled with the first layer of items.');
-        await sleep(1000); 
-    } catch (err) {
-        throw new Error(`Failed to fill inventory from chest: ${err.message}`);
-    }
-};
-
 const buildStructure = async () => {
     if (state.isBuilding) return;
     state.isBuilding = true;
@@ -149,12 +150,6 @@ const buildStructure = async () => {
         if (!state.buildPos || !state.structure) {
             throw new Error('Set build position and load schematic first. Use !come x y z.');
         }
-
-        log('Getting items from chest...');
-        await fillInventoryFromChest();
-
-        log('Returning to build location and starting build.');
-        await goToPosition(state.buildPos);
 
         const blocks = state.structure.blocks.value.value;
         const palette = state.structure.palette.value.value;
@@ -173,34 +168,36 @@ const buildStructure = async () => {
                 block.pos.value[2] + state.buildPos.z
             );
             
+            // Check if the bot already has the item in inventory
+            let item = bot.inventory.findInventoryItem(bot.mcData.blocksByName[blockName]?.id, null, false);
+            if (!item) {
+                // If not, go to chest and get it
+                await getSingleItemFromChest(blockName);
+                // Recheck inventory
+                item = bot.inventory.findInventoryItem(bot.mcData.blocksByName[blockName]?.id, null, false);
+                if (!item) {
+                    log(`Skipping ${blockName} as no matching item was found in inventory or chest.`);
+                    continue;
+                }
+            }
+            
+            // Go to build location
+            await goToPosition(position);
+
             const existingBlock = bot.blockAt(position);
             if (existingBlock && existingBlock.name === blockName) {
                 continue; 
             }
 
-            let itemFound = false;
-            const actualItems = specialItems[blockName] || [blockName];
-
-            for (const actualItemName of actualItems) {
-                let item = bot.inventory.findInventoryItem(bot.mcData.blocksByName[actualItemName]?.id, null, false);
-                if (item) {
-                    try {
-                        await bot.equip(item, 'hand');
-                        const referenceBlock = bot.blockAt(position.minus(new Vec3(0, 1, 0)));
-                        await bot.placeBlock(referenceBlock, new Vec3(0, 1, 0));
-                        blocksPlaced++;
-                        itemFound = true;
-                        await sleep(CONFIG.buildDelay);
-                        break; 
-                    } catch (err) {
-                        log(`Building error at ${position.x},${position.y},${position.z}: ${err.message}`);
-                        await sleep(1000); 
-                    }
-                }
-            }
-
-            if (!itemFound) {
-                log(`Skipping ${blockName} as no matching item was found in inventory.`);
+            try {
+                await bot.equip(item, 'hand');
+                const referenceBlock = bot.blockAt(position.minus(new Vec3(0, 1, 0)));
+                await bot.placeBlock(referenceBlock, new Vec3(0, 1, 0));
+                blocksPlaced++;
+                await sleep(CONFIG.buildDelay);
+            } catch (err) {
+                log(`Building error at ${position.x},${position.y},${position.z}: ${err.message}`);
+                await sleep(1000); 
             }
         }
 
