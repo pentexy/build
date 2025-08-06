@@ -15,7 +15,7 @@ const CONFIG = {
     username: 'BuilderBot',
     buildDelay: 200,
     schematicUrl: 'https://files.catbox.moe/r7z2gh.nbt',
-    chestSearchRadius: 10, // New configuration for chest search radius
+    chestSearchRadius: 10,
 };
 
 const bot = mineflayer.createBot({
@@ -51,7 +51,7 @@ const getBlockName = (blockState) => {
 };
 
 const goToPosition = async (position) => {
-    const mcData = mcDataLoader(bot.version);
+    const mcData = bot.mcData; // Use the pre-loaded mcData
     const movements = new Movements(bot, mcData);
     bot.pathfinder.setMovements(movements);
     bot.pathfinder.setGoal(new GoalNear(position.x, position.y, position.z, 1));
@@ -111,7 +111,7 @@ const fillInventoryFromChest = async () => {
     try {
         log(`Searching for a chest within a ${CONFIG.chestSearchRadius} block radius of ${state.chestPos.x}, ${state.chestPos.y}, ${state.chestPos.z}...`);
         
-        // Search for the nearest chest
+        // Search for the nearest chest using the loaded mcData
         const chestBlock = bot.findBlock({
             matching: bot.mcData.blocksByName.chest.id,
             maxDistance: CONFIG.chestSearchRadius,
@@ -128,7 +128,7 @@ const fillInventoryFromChest = async () => {
         const chest = await bot.openChest(chestBlock);
         log('Transferring items from chest to inventory...');
         
-        for (let i = 0; i < 9; i++) { // Get items from the first row
+        for (let i = 0; i < 9; i++) {
             const item = chest.slots[i];
             if (item) {
                 await chest.withdraw(item.type, null, item.count);
@@ -142,6 +142,154 @@ const fillInventoryFromChest = async () => {
         throw new Error(`Failed to fill inventory from chest: ${err.message}`);
     }
 };
+
+const buildStructure = async () => {
+    if (state.isBuilding) return;
+    state.isBuilding = true;
+
+    try {
+        if (!state.buildPos || !state.structure) {
+            throw new Error('Set build position and load schematic first. Use !come x y z.');
+        }
+
+        log('Getting items from chest...');
+        await fillInventoryFromChest();
+
+        log('Returning to build location and starting build.');
+        await goToPosition(state.buildPos);
+
+        const blocks = state.structure.blocks.value.value;
+        const palette = state.structure.palette.value.value;
+        let blocksPlaced = 0;
+
+        for (const block of blocks) {
+            if (!state.isBuilding) break;
+
+            const blockState = palette[block.state.value];
+            const blockName = getBlockName(blockState);
+            if (blockName === 'air') continue;
+            
+            const position = new Vec3(
+                block.pos.value[0] + state.buildPos.x,
+                block.pos.value[1] + state.buildPos.y,
+                block.pos.value[2] + state.buildPos.z
+            );
+            
+            const existingBlock = bot.blockAt(position);
+            if (existingBlock && existingBlock.name === blockName) {
+                continue; 
+            }
+
+            let itemFound = false;
+            const actualItems = specialItems[blockName] || [blockName];
+
+            for (const actualItemName of actualItems) {
+                let item = bot.inventory.findInventoryItem(bot.mcData.blocksByName[actualItemName]?.id, null, false);
+                if (item) {
+                    try {
+                        await bot.equip(item, 'hand');
+                        const referenceBlock = bot.blockAt(position.minus(new Vec3(0, 1, 0)));
+                        await bot.placeBlock(referenceBlock, new Vec3(0, 1, 0));
+                        blocksPlaced++;
+                        itemFound = true;
+                        await sleep(CONFIG.buildDelay);
+                        break; 
+                    } catch (err) {
+                        log(`Building error at ${position.x},${position.y},${position.z}: ${err.message}`);
+                        await sleep(1000); 
+                    }
+                }
+            }
+
+            if (!itemFound) {
+                log(`Skipping ${blockName} as no matching item was found in inventory.`);
+            }
+        }
+
+        log('Build complete!');
+    } catch (err) {
+        log(`Build failed: ${err.message}`);
+    } finally {
+        state.isBuilding = false;
+    }
+};
+
+// Event handlers
+bot.once('spawn', async () => {
+    bot.mcData = mcDataLoader(bot.version); // Load mcData and attach it to the bot object
+    log('Bot ready!');
+    await downloadSchematic();
+});
+
+bot.on('chat', (username, message) => {
+    if (username === bot.username) return;
+
+    const args = message.trim().split(' ');
+    const cmd = args[0].toLowerCase();
+
+    (async () => {
+        try {
+            switch (cmd) {
+                case '!setchest':
+                    if (args.length === 4) {
+                        state.chestPos = new Vec3(+args[1], +args[2], +args[3]);
+                        log(`Chest location set to ${state.chestPos.x}, ${state.chestPos.y}, ${state.chestPos.z}`);
+                    } else {
+                         log('Usage: !setchest <x> <y> <z>');
+                    }
+                    break;
+
+                case '!come':
+                    if (args.length === 4) {
+                        state.buildPos = new Vec3(+args[1], +args[2], +args[3]);
+                        log(`Going to build location ${state.buildPos.x}, ${state.buildPos.y}, ${state.buildPos.z}`);
+                        await goToPosition(state.buildPos);
+                        log('Arrived at build location');
+                    } else {
+                         log('Usage: !come <x> <y> <z>');
+                    }
+                    break;
+
+                case '!build':
+                    await buildStructure();
+                    break;
+
+                case '!stop':
+                    state.isBuilding = false;
+                    log('Stopped building');
+                    break;
+
+                case '!materials':
+                    if (Object.keys(state.requiredItems).length > 0) {
+                        const materialsList = [];
+                        for (const [name, count] of Object.entries(state.requiredItems)) {
+                             const actualItemNames = specialItems[name] || [name];
+                             const displayNames = Array.isArray(actualItemNames) ? actualItemNames.join(' & ') : actualItemNames;
+                             materialsList.push(`${displayNames}: ${count}`);
+                        }
+                        log(materialsList.join(', '));
+                    } else {
+                        log('Schematic not loaded or has no blocks.');
+                    }
+                    break;
+
+                case '!help':
+                    log('Available commands: !setchest <x y z>, !come <x y z>, !build, !stop, !materials, !help');
+                    break;
+            }
+        } catch (err) {
+            log(`Command error: ${err.message}`);
+        }
+    })();
+});
+
+// For Node.js <18
+const fetch = (...args) => import('node-fetch').then(({default: fetch}) => fetch(...args));
+
+// Error handling
+bot.on('error', err => log(`Bot error: ${err.message}`));
+bot.on('kicked', reason => log(`Kicked: ${reason}`));
+bot.on('end', reason => log(`Disconnected: ${reason}`));};
 
 const buildStructure = async () => {
     if (state.isBuilding) return;
