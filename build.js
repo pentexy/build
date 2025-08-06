@@ -113,7 +113,7 @@ const getItemsForLayer = async (requiredItems) => {
     if (!state.chestPos) {
         throw new Error('No chest set. Cannot get items.');
     }
-    
+
     await goToPosition(state.chestPos);
     
     const chestBlock = bot.findBlock({
@@ -130,16 +130,21 @@ const getItemsForLayer = async (requiredItems) => {
     
     try {
         for (const [itemName, count] of Object.entries(requiredItems)) {
-            const itemToWithdraw = chest.slots.find(item => item && item.name === itemName);
+            const currentItemCount = bot.inventory.count(bot.mcData.blocksByName[itemName]?.id);
+            const amountToWithdraw = count - currentItemCount;
+            
+            if (amountToWithdraw > 0) {
+                const itemToWithdraw = chest.slots.find(item => item && item.name === itemName);
 
-            if (itemToWithdraw) {
-                const amountToWithdraw = Math.min(count, itemToWithdraw.count);
-                await chest.withdraw(itemToWithdraw.type, null, amountToWithdraw);
-                log(`Withdrew ${amountToWithdraw} ${itemName} from chest.`);
-            } else {
-                log(`Could not find ${itemName} in chest. Will not be able to build.`);
+                if (itemToWithdraw) {
+                    const actualAmount = Math.min(amountToWithdraw, itemToWithdraw.count);
+                    await chest.withdraw(itemToWithdraw.type, null, actualAmount);
+                    log(`Withdrew ${actualAmount} ${itemName} from chest.`);
+                } else {
+                    log(`Could not find ${itemName} in chest. Will not be able to build this block.`);
+                }
+                await sleep(1000);
             }
-            await sleep(1000);
         }
     } finally {
         await chest.close();
@@ -161,7 +166,6 @@ const buildStructure = async () => {
         
         const blocksByLayer = new Map();
         
-        // Group blocks by layer (y-coordinate)
         blocks.forEach(block => {
             const y = block.pos.value[1];
             if (!blocksByLayer.has(y)) {
@@ -178,7 +182,6 @@ const buildStructure = async () => {
             const layerBlocks = blocksByLayer.get(y);
             const layerRequiredItems = {};
 
-            // Determine all items needed for this layer
             for (const block of layerBlocks) {
                 const blockState = palette[block.state.value];
                 const blockName = getBlockName(blockState);
@@ -187,10 +190,8 @@ const buildStructure = async () => {
                 }
             }
             
-            // Withdraw all items needed for this layer from the chest
             await getItemsForLayer(layerRequiredItems);
 
-            // Now, build the entire layer
             for (const block of layerBlocks) {
                 if (!state.isBuilding) break;
                 
