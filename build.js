@@ -13,13 +13,13 @@ const fetch = (...args) => import('node-fetch').then(({default: fetch}) => fetch
 
 // Configuration
 const CONFIG = {
-    host: 'dares-directory.ap.e4mc.link',
+    host: 'sanctity-dial.ap.e4mc.link',
     port: 25565,
     username: 'BuilderBot',
     buildDelay: 100, // Delay between placing blocks
     maxRetries: 3,
     schematicUrl: 'https://files.catbox.moe/r7z2gh.nbt', // URL to your schematic
-    schematicFile: 'house.nbt',{// Local file name for schematic
+    schematicFile: 'house.nbt', // Local file name for schematic
     safetyCheck: true, // Not fully implemented, but good to have
     clearInventory: false, // Not fully implemented
     requestItems: true, // Not fully implemented
@@ -222,7 +222,7 @@ const placeScaffolding = async (targetPos) => {
     const targetBlockY = targetPos.y;
     const diffY = targetBlockY - botY;
 
-    // If the target block is more than 2 blocks above the bot, or if it's too far horizontally
+    // If the target block is more than 1.5 blocks above the bot, or if it's too far horizontally
     if (diffY > 1.5 || bot.entity.position.distanceTo(targetPos) > 4) {
         log(`Placing scaffolding to reach ${targetPos.x}, ${targetPos.y}, ${targetPos.z}`);
         
@@ -233,10 +233,6 @@ const placeScaffolding = async (targetPos) => {
         }
 
         // Determine a good scaffolding position (e.g., directly below or next to target)
-        let scaffoldPlacePos = new Vec3(targetPos.x, botY, targetPos.z);
-        let referenceBlock = bot.blockAt(scaffoldPlacePos.offset(0, -1, 0));
-
-        // Find a suitable spot to place scaffolding
         let currentScaffoldY = botY -1;
         while (currentScaffoldY < targetBlockY - 1) { // Build up to one block below target
             let placePos = new Vec3(targetPos.x, currentScaffoldY, targetPos.z);
