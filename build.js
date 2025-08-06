@@ -1,6 +1,6 @@
 const mineflayer = require('mineflayer');
 const { pathfinder, Movements, goals } = require('mineflayer-pathfinder');
-const { GoalBlock, GoalNear } = goals;
+const { GoalNear } = goals;
 const fs = require('fs');
 const nbt = require('prismarine-nbt');
 const { Vec3 } = require('vec3');
@@ -32,7 +32,6 @@ const bot = mineflayer.createBot({
 
 bot.loadPlugin(pathfinder);
 
-// State management
 const state = {
     chestPos: null,
     buildPos: null,
@@ -95,17 +94,20 @@ const downloadSchematic = async () => {
         fs.writeFileSync(CONFIG.schematicFile, buffer);
         
         const data = await nbt.parse(buffer);
-        state.structure = data.parsed.value;
-        log('Schematic loaded successfully ✅');
-        
-        // Parse required blocks
+        const schematic = data.parsed.value;
+        state.structure = schematic;
+
+        const blocks = schematic.blocks.value.value;
+        const palette = schematic.palette.value.value;
+
         state.requiredItems = {};
-        state.structure.blocks.value.forEach(block => {
-            const blockState = state.structure.palette.value[block.state.value];
+        blocks.forEach(block => {
+            const blockState = palette[block.state.value];
             const name = getBlockName(blockState);
             state.requiredItems[name] = (state.requiredItems[name] || 0) + 1;
         });
-        
+
+        log('Schematic loaded successfully ✅');
         return true;
     } catch (err) {
         log(`Failed to load schematic: ${err.message}`);
@@ -118,16 +120,16 @@ const buildStructure = async () => {
         log('Already building!');
         return;
     }
-    
+
     state.isBuilding = true;
-    
+
     try {
         if (!state.buildPos || !state.structure) {
             throw new Error('Set a build position and load schematic first');
         }
 
         scanInventory();
-        
+
         if (CONFIG.clearInventory) {
             for (const item of bot.inventory.items()) {
                 if (!state.requiredItems[item.name]) {
@@ -141,40 +143,40 @@ const buildStructure = async () => {
         }
 
         log('Starting building process 🧱');
-        
-        const blocks = state.structure.blocks.value;
-        
+
+        const blocks = state.structure.blocks.value.value;
+        const palette = state.structure.palette.value.value;
+
         for (let i = 0; i < blocks.length; i++) {
             const block = blocks[i];
-            const blockState = state.structure.palette.value[block.state.value];
+            const blockState = palette[block.state.value];
             const blockName = getBlockName(blockState);
             const position = new Vec3(
                 block.pos.value[0] + state.buildPos.x,
                 block.pos.value[1] + state.buildPos.y,
                 block.pos.value[2] + state.buildPos.z
             );
-            
+
             const item = bot.inventory.items().find(it => it.name === blockName);
-            
             if (!item) {
                 log(`Out of ${blockName}, skipping...`);
                 continue;
             }
-            
+
             try {
                 await bot.equip(item, 'hand');
-                const referenceBlock = bot.blockAt(position.offset(0, -1, 0));
-                if (!referenceBlock || referenceBlock.name === 'air') {
-                    log(`No solid block below ${position}, skipping.`);
+                const reference = bot.blockAt(position.offset(0, -1, 0));
+                if (!reference || reference.name === 'air') {
+                    log(`No support below ${position}, skipping block`);
                     continue;
                 }
-                await bot.placeBlock(referenceBlock, new Vec3(0, 1, 0));
+                await bot.placeBlock(reference, new Vec3(0, 1, 0));
                 await sleep(CONFIG.buildDelay);
             } catch (err) {
                 log(`Failed to place ${blockName} at ${position}: ${err.message}`);
             }
         }
-        
+
         log('Build complete ✅');
     } catch (err) {
         log(`Build failed: ${err.message}`);
