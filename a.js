@@ -256,4 +256,119 @@ bot.on('chat', (username, message) => {
             createShelter();
         }
     }
+});const createShelter = async () => {
+    if (!master) return;
+    currentMode = SHELTER_MODE;
+    console.log(`[TheKnight] Building shelter for master.`);
+
+    const buildingBlock = findBuildingBlock();
+    if (!buildingBlock) {
+        console.log(`[TheKnight] I have no building blocks! I am but a humble knight with empty hands.`);
+        currentMode = FOLLOW_MODE;
+        return;
+    }
+
+    const masterPos = master.position.floored();
+    const positions = [
+        masterPos.offset(1, 0, 0),
+        masterPos.offset(-1, 0, 0),
+        masterPos.offset(0, 0, 1),
+        masterPos.offset(0, 0, -1)
+    ];
+
+    await equipItem(buildingBlock.name);
+
+    for (const pos of positions) {
+        const block = bot.blockAt(pos);
+        if (block?.name === 'air') {
+            await bot.lookAt(pos);
+            await bot.placeBlock(block, new Vec3(0, 1, 0));
+        }
+    }
+
+    bot.chat(`By my honor, the walls are built! My liege is safe.`);
+    console.log(`[TheKnight] Shelter built. Returning to follow mode.`);
+    currentMode = FOLLOW_MODE;
+};
+
+bot.once('spawn', () => {
+    bot.mcData = require('minecraft-data')(bot.version);
+    bot.chat('TheKnight v1. [ bEta ] has arrived, ready to serve! My watch begins.');
+    console.log('[TheKnight] Bot is ready! Waiting for master.');
+});
+
+bot.on('playerJoined', (player) => {
+    if (player.username === CONFIG.masterUsername) {
+        master = player.entity;
+        currentMode = FOLLOW_MODE;
+        console.log(`[TheKnight] Master ${CONFIG.masterUsername} found. Entering follow mode.`);
+    }
+});
+
+bot.on('physicsTick', async () => {
+    if (!master || currentMode === SHELTER_MODE) {
+        return;
+    }
+
+    await handleSelfClutch();
+    if (currentMode === MGL_CLUTCH_MODE) return;
+
+    handleHealing();
+
+    if (currentMode === THREAT_ATTACK_MODE) {
+        pvpLogic();
+        return;
+    }
+
+    if (currentMode === FOLLOW_MODE) {
+        const movements = new Movements(bot, bot.mcData);
+        bot.pathfinder.setMovements(movements);
+        bot.pathfinder.setGoal(new GoalFollow(master, 2), true);
+        bot.setControlState('sprint', true);
+
+        const potentialTargets = bot.entities.filter(e => {
+            return (e.type === 'mob' || (e.type === 'player' && e.username !== CONFIG.masterUsername)) && e.position.distanceTo(master.position) < CONFIG.maxRadius;
+        });
+
+        if (potentialTargets.length > 0) {
+            currentTarget = potentialTargets.sort((a, b) => master.position.distanceTo(a.position) - master.position.distanceTo(b.position))[0];
+            currentMode = THREAT_ATTACK_MODE;
+            console.log(`[TheKnight] Hostile threat detected. Engaging ${currentTarget.username || currentTarget.name}.`);
+        }
+    }
+});
+
+bot.on('entityHurt', (entity) => {
+    if (entity.username === CONFIG.masterUsername) {
+        const attacker = bot.nearestEntity((e) => {
+            return (e.type === 'mob' || (e.type === 'player' && e.username !== CONFIG.masterUsername)) && e.position.distanceTo(entity.position) < 10;
+        });
+        if (attacker) {
+            currentTarget = attacker;
+            currentMode = THREAT_ATTACK_MODE;
+            if (attacker.type === 'player') {
+                console.log(`[TheKnight] My liege has been harmed by a player! Engaging ${attacker.username}!`);
+                bot.chat(`/tellraw ${attacker.username} {"text":"Behold, knave! You've disturbed my liege, now prepare for a spanking! (This is for fun)"}`);
+            } else {
+                console.log(`[TheKnight] My liege has been harmed by a ${attacker.name}! Engaging!`);
+            }
+        }
+    }
+});
+
+
+bot.on('chat', (username, message) => {
+    if (username === bot.username) return;
+
+    if (username === CONFIG.masterUsername) {
+        const args = message.split(' ');
+        if (args[0] === '!stop') {
+            bot.pathfinder.setGoal(null);
+            currentMode = FOLLOW_MODE;
+            console.log('[TheKnight] Stopping all actions by command.');
+            bot.chat('As you command, my liege. I shall stand down.');
+        } else if (args[0] === '!shelter') {
+            createShelter();
+        }
+    }
 });
