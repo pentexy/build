@@ -74,13 +74,13 @@ const downloadSchematic = async () => {
     try {
         log('Loading schematic...');
         const res = await fetch(CONFIG.schematicUrl);
-        const buffer = await res.buffer();
+        const arrayBuffer = await res.arrayBuffer();
+        const buffer = Buffer.from(arrayBuffer);
         fs.writeFileSync('schematic.nbt', buffer);
         
         const data = await nbt.parse(buffer);
         state.structure = data.parsed.value;
 
-        // Corrected: Only count non-air blocks as required items
         state.requiredItems = {};
         state.structure.blocks.value.value.forEach(block => {
             const blockState = state.structure.palette.value.value[block.state.value];
