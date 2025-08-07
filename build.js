@@ -149,7 +149,12 @@ const buildScaffold = async (targetY) => {
 };
 
 const buildStructure = async () => {
-    if (state.isBuilding || !state.buildPos || !state.structure) return;
+    if (state.isBuilding || !state.buildPos || !state.structure) {
+        if (!state.buildPos) {
+            log('Error: Build position is not set. Use !setbuildpos <x> <y> <z>.');
+        }
+        return;
+    }
     state.isBuilding = true;
 
     try {
@@ -185,7 +190,7 @@ const buildStructure = async () => {
             }
 
             try {
-                await goToPosition(position.offset(0, -1, 0));
+                await goToPosition(position.offset(0.5, 0, 0.5));
                 
                 await bot.equip(item, 'hand');
                 const blockToPlaceOn = bot.blockAt(position.offset(0, -1, 0));
@@ -228,7 +233,7 @@ bot.on('chat', (username, message) => {
             switch (cmd) {
                 case '!setbuildpos':
                     if (args.length === 4) {
-                        state.buildPos = new Vec3(+args[1], +args[2], +args[3]);
+                        state.buildPos = new Vec3(parseFloat(args[1]), parseFloat(args[2]), parseFloat(args[3]));
                         log(`Build location set to ${state.buildPos.x}, ${state.buildPos.y}, ${state.buildPos.z}`);
                     } else {
                         log('Usage: !setbuildpos <x> <y> <z>');
