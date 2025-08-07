@@ -151,6 +151,10 @@ const buildStructure = async () => {
 
             const blockState = palette[block.state.value];
             const blockName = getBlockName(blockState);
+
+            // Skip air blocks
+            if (blockName === 'air') continue;
+
             const position = new Vec3(
                 block.pos.value[0] + state.buildPos.x,
                 block.pos.value[1] + state.buildPos.y,
@@ -167,8 +171,11 @@ const buildStructure = async () => {
 
             try {
                 await bot.equip(item, 'hand');
-                await bot.placeBlock(bot.blockAt(position), new Vec3(0, 1, 0));
-                await sleep(CONFIG.buildDelay);
+                const referenceBlock = bot.blockAt(position.offset(0, -1, 0)); // Get the block below to use as a reference
+                if (referenceBlock) {
+                    await bot.placeBlock(referenceBlock, new Vec3(0, 1, 0));
+                    await sleep(CONFIG.buildDelay);
+                }
             } catch (err) {
                 log(`Building error: ${err.message}`);
             }
