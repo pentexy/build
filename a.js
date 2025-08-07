@@ -32,7 +32,6 @@ let master = null;
 let currentTarget = null;
 let currentMode = null;
 let lastBotY = null;
-let pvpInterval = null;
 
 // Helper functions for hotbar and inventory management
 const findBestWeapon = () => {
@@ -63,7 +62,7 @@ const equipItem = async (itemName, location = 'hand') => {
     }
 };
 
-// Advanced PvP Logic for generic threats
+// Advanced PvP Logic
 const pvpLogic = async () => {
     if (!master || !currentTarget) {
         // No target, return to follow mode
@@ -155,7 +154,7 @@ const createShelter = async () => {
 
     const buildingBlock = findBuildingBlock();
     if (!buildingBlock) {
-        console.log(`[TheKnight] I have no building blocks! I am but a humble knight with empty hands.`);
+        bot.chat(`I have no building blocks! I am but a humble knight with empty hands.`);
         currentMode = FOLLOW_MODE;
         return;
     }
@@ -200,28 +199,40 @@ bot.on('playerJoined', (player) => {
 
 // Primary bot logic loop
 bot.on('physicsTick', async () => {
-    if (!master || currentMode === MGL_CLUTCH_MODE || currentMode === SHELTER_MODE) {
-        return; 
+    if (!master) {
+        return;
     }
 
     await handleSelfClutch();
+    if (currentMode === MGL_CLUTCH_MODE) return;
+
+    if (currentMode === SHELTER_MODE) return;
 
     handleHealing();
 
-    // Check for threats first
+    // Prioritize attacking if a target exists
+    if (currentTarget) {
+        currentMode = THREAT_ATTACK_MODE;
+        pvpLogic();
+        return;
+    }
+
+    // If no target, check for new threats
     const potentialTargets = bot.entities.filter(e => {
         return (e.type === 'mob' || (e.type === 'player' && e.username !== CONFIG.masterUsername)) && e.position.distanceTo(master.position) < CONFIG.maxRadius;
     });
 
     if (potentialTargets.length > 0) {
-        // If there's a new, closer threat, switch targets
         const closestThreat = potentialTargets.sort((a, b) => master.position.distanceTo(a.position) - master.position.distanceTo(b.position))[0];
         if (!currentTarget || closestThreat.position.distanceTo(master.position) < currentTarget.position.distanceTo(master.position)) {
             currentTarget = closestThreat;
             currentMode = THREAT_ATTACK_MODE;
             console.log(`[TheKnight] Threat detected! Engaging ${currentTarget.username || currentTarget.name}.`);
+            // Check if it's a player, send a playful chat message
+            if (currentTarget.type === 'player') {
+                bot.chat(`/tellraw ${currentTarget.username} {"text":"Behold, knave! You've disturbed my liege, now prepare for a spanking! (This is for fun)"}`);
+            }
         }
-        pvpLogic();
     } else {
         // No threats, return to following master
         currentMode = FOLLOW_MODE;
