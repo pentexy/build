@@ -18,6 +18,7 @@ const CONFIG = {
     masterUsername: 'RAREAURA',
     attackDelay: 50,
     maxRadius: 20,
+    greetingCooldown: 10000 // 10 seconds in milliseconds
 };
 
 const bot = mineflayer.createBot({
@@ -32,6 +33,7 @@ let master = null;
 let currentTarget = null;
 let currentMode = null;
 let lastBotY = null;
+let lastGreetTime = 0;
 
 // Helper functions for hotbar and inventory management
 const findBestWeapon = () => {
@@ -62,17 +64,15 @@ const equipItem = async (itemName, location = 'hand') => {
     }
 };
 
-// Advanced PvP Logic
+// Advanced PvP Logic for generic threats
 const pvpLogic = async () => {
     if (!master || !currentTarget) {
-        // No target, return to follow mode
         currentMode = FOLLOW_MODE;
         return;
     }
     
     const distance = bot.entity.position.distanceTo(currentTarget.position);
     
-    // Equip best weapon
     const weapon = findBestWeapon();
     if (weapon) {
         await equipItem(weapon.name);
@@ -182,6 +182,15 @@ const createShelter = async () => {
     currentMode = FOLLOW_MODE;
 };
 
+// Greeting function
+const greetMaster = async () => {
+    const now = Date.now();
+    if (now - lastGreetTime > CONFIG.greetingCooldown) {
+        bot.chat(`Hii, my liege! I am at your service.`);
+        lastGreetTime = now;
+    }
+};
+
 // Event handlers
 bot.once('spawn', () => {
     bot.mcData = require('minecraft-data')(bot.version);
@@ -194,6 +203,7 @@ bot.on('playerJoined', (player) => {
         master = player.entity;
         currentMode = FOLLOW_MODE;
         console.log(`[TheKnight] Master ${CONFIG.masterUsername} found. Entering follow mode.`);
+        greetMaster();
     }
 });
 
@@ -203,42 +213,36 @@ bot.on('physicsTick', async () => {
         return;
     }
 
-    await handleSelfClutch();
-    if (currentMode === MGL_CLUTCH_MODE) return;
-
-    if (currentMode === SHELTER_MODE) return;
-
-    handleHealing();
-
-    // Prioritize attacking if a target exists
-    if (currentTarget) {
-        currentMode = THREAT_ATTACK_MODE;
-        pvpLogic();
+    // High priority modes
+    if (currentMode === MGL_CLUTCH_MODE || currentMode === SHELTER_MODE) {
         return;
     }
 
-    // If no target, check for new threats
+    // Always check for clutch and healing
+    await handleSelfClutch();
+    handleHealing();
+
+    // Check if master is close enough to greet
+    if (master.position.distanceTo(bot.entity.position) < 5) {
+        greetMaster();
+    }
+
+    // Check for threats
     const potentialTargets = bot.entities.filter(e => {
         return (e.type === 'mob' || (e.type === 'player' && e.username !== CONFIG.masterUsername)) && e.position.distanceTo(master.position) < CONFIG.maxRadius;
     });
 
     if (potentialTargets.length > 0) {
         const closestThreat = potentialTargets.sort((a, b) => master.position.distanceTo(a.position) - master.position.distanceTo(b.position))[0];
-        if (!currentTarget || closestThreat.position.distanceTo(master.position) < currentTarget.position.distanceTo(master.position)) {
-            currentTarget = closestThreat;
-            currentMode = THREAT_ATTACK_MODE;
-            console.log(`[TheKnight] Threat detected! Engaging ${currentTarget.username || currentTarget.name}.`);
-            // Check if it's a player, send a playful chat message
-            if (currentTarget.type === 'player') {
-                bot.chat(`/tellraw ${currentTarget.username} {"text":"Behold, knave! You've disturbed my liege, now prepare for a spanking! (This is for fun)"}`);
-            }
-        }
+        currentTarget = closestThreat;
+        currentMode = THREAT_ATTACK_MODE;
+        pvpLogic();
     } else {
-        // No threats, return to following master
-        currentMode = FOLLOW_MODE;
         currentTarget = null;
+        currentMode = FOLLOW_MODE;
     }
     
+    // Default mode is to follow the master
     if (currentMode === FOLLOW_MODE) {
         bot.setControlState('sprint', true);
         const movements = new Movements(bot, bot.mcData);
@@ -247,7 +251,7 @@ bot.on('physicsTick', async () => {
     }
 });
 
-// Corrected entityHurt listener to handle both players and mobs
+// Refined entityHurt listener for a quick response
 bot.on('entityHurt', (entity) => {
     if (entity.username === CONFIG.masterUsername) {
         const attacker = bot.nearestEntity((e) => {
