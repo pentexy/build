@@ -80,12 +80,14 @@ const downloadSchematic = async () => {
         const data = await nbt.parse(buffer);
         state.structure = data.parsed.value;
 
-        // Calculate required items
+        // Corrected: Only count non-air blocks as required items
         state.requiredItems = {};
         state.structure.blocks.value.value.forEach(block => {
             const blockState = state.structure.palette.value.value[block.state.value];
             const name = getBlockName(blockState);
-            if (name) state.requiredItems[name] = (state.requiredItems[name] || 0) + 1;
+            if (name && name !== 'air') {
+                state.requiredItems[name] = (state.requiredItems[name] || 0) + 1;
+            }
         });
 
         updateMissingItems();
@@ -253,9 +255,6 @@ bot.on('playerCollect', (collector, item) => {
         updateMissingItems();
     }
 });
-
-// For Node.js <18
-const fetch = (...args) => import('node-fetch').then(({default: fetch}) => fetch(...args));
 
 // Error handling
 bot.on('error', err => log(`Bot error: ${err.message}`));
